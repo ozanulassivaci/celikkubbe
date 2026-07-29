@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+*.egg
+build/
+dist/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Testing / coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# IDE
+.vscode/
+.idea/
+.claude/
+
+# OS
+.DS_Store
+
+# Model weights, datasets, rendered assets
+*.pt
+*.onnx
+*.engine
+*.pth
+*.weights
+*.npy
+*.npz
+*.png
+*.jpg
+*.jpeg
+*.bag
+
+# Env / secrets
+.env
+.env.*
