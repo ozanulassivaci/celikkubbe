@@ -46,12 +46,15 @@ class RangeGate:
     def evaluate(
         cls: TargetClass | None, range_m: float | None, stage: Stage
     ) -> tuple[bool, ReasonCode | None]:
-        if range_m is None:
+        # Fails closed: a class with no entry in RANGE_RULES (including
+        # UNKNOWN and None) is rejected, same as an unknown range_m. "No
+        # rule" must never be read as "no limit". Stage 1/2 stay lenient
+        # so development against a depth-less webcam or an unlisted class
+        # (e.g. balloons before classification) still works.
+        bounds = config.RANGE_RULES.get(cls)
+        if range_m is None or bounds is None:
             if stage is Stage.STAGE_3:
                 return False, ReasonCode.RANGE_UNKNOWN
-            return True, None
-        bounds = config.RANGE_RULES.get(cls)
-        if bounds is None:
             return True, None
         lo, hi = bounds
         if lo <= range_m <= hi:

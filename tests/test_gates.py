@@ -85,10 +85,28 @@ def test_range_gate_enforces_bounds_for_known_class() -> None:
     assert passed is False
 
 
-def test_range_gate_allows_class_without_rule() -> None:
-    passed, reason = RangeGate.evaluate(TargetClass.BALLOON, 100.0, Stage.STAGE_3)
+def test_balloon_has_an_explicit_range_rule() -> None:
+    assert TargetClass.BALLOON in config.RANGE_RULES
+    passed, reason = RangeGate.evaluate(TargetClass.BALLOON, 10.0, Stage.STAGE_3)
     assert passed is True
     assert reason is None
+
+
+def test_range_gate_fails_closed_for_class_without_rule_in_stage3() -> None:
+    passed, reason = RangeGate.evaluate(TargetClass.UNKNOWN, 5.0, Stage.STAGE_3)
+    assert passed is False
+    assert reason is ReasonCode.RANGE_UNKNOWN
+
+    passed, reason = RangeGate.evaluate(None, 5.0, Stage.STAGE_3)
+    assert passed is False
+    assert reason is ReasonCode.RANGE_UNKNOWN
+
+
+def test_range_gate_allows_class_without_rule_in_stage1_and_2() -> None:
+    for stage in (Stage.STAGE_1, Stage.STAGE_2):
+        passed, reason = RangeGate.evaluate(TargetClass.UNKNOWN, 100.0, stage)
+        assert passed is True
+        assert reason is None
 
 
 def test_confidence_gate_boundary() -> None:

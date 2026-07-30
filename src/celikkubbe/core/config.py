@@ -50,11 +50,14 @@ HIT_VERIFY_MS = 1500
 DEFAULT_RANGE_M = 10.0  # parallax assumption when nothing is locked
 
 # --- class/range rule (Stage 3) ---
+# A class absent from this table is rejected (RangeGate fails closed), not
+# allowed by default: a missing rule must never silently mean "no limit".
 RANGE_RULES: dict[TargetClass, tuple[float, float]] = {
     TargetClass.F16: (10.0, 15.0),
     TargetClass.HELICOPTER: (5.0, 15.0),
     TargetClass.MISSILE: (5.0, 15.0),
     TargetClass.UAV: (0.0, 15.0),
+    TargetClass.BALLOON: (0.0, 15.0),
 }
 
 # --- prioritisation ---
