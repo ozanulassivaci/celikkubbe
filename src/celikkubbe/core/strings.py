@@ -26,6 +26,7 @@ REASON_CODE_TR: dict[ReasonCode, str] = {
     ReasonCode.LINK_TIMEOUT: "STM32 baglantisi zaman asimina ugradi",
     ReasonCode.DEPTH_UNRELIABLE: "Derinlik verisi guvenilir degil",
     ReasonCode.OPERATOR_OVERRIDE: "Operator mudahalesi",
+    ReasonCode.SETPOINT_NOT_ACKED: "Komut edilen aci henuz dogrulanmadi",
 }
 
 

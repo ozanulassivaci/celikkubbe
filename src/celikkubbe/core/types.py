@@ -95,6 +95,7 @@ class ReasonCode(Enum):
     LINK_TIMEOUT = "LINK_TIMEOUT"
     DEPTH_UNRELIABLE = "DEPTH_UNRELIABLE"
     OPERATOR_OVERRIDE = "OPERATOR_OVERRIDE"
+    SETPOINT_NOT_ACKED = "SETPOINT_NOT_ACKED"
 
 
 @dataclass(frozen=True)
@@ -137,8 +138,16 @@ class Detection:
     iff: IFF
 
 
-@dataclass
+@dataclass(frozen=True)
 class Track:
+    """A single frame's worth of perception output for one target.
+
+    Frozen: the tracker (``tracking.py``) builds a fresh ``Track`` every
+    frame rather than mutating one in place. Engagement bookkeeping that
+    must survive across frames (shot attempts) does not belong here for
+    exactly that reason — see ``SystemState.attempts``.
+    """
+
     track_id: int
     cls: TargetClass | None
     confidence: float
@@ -150,7 +159,6 @@ class Track:
     risk_score: float
     frames_confirmed: int
     last_seen_t: float
-    engagement_attempts: int
 
 
 @dataclass(frozen=True)
@@ -195,15 +203,38 @@ class SelfTestResult:
         return all(item.passed for item in self.items)
 
 
-@dataclass
+@dataclass(frozen=True)
+class OperatorInput:
+    """Manual controls sampled once per tick. Stage 2/3 ignore this entirely."""
+
+    fire_requested: bool = False
+    manual_target_id: int | None = None
+    arm_held: bool = False  # Stage 1 RT hold-to-arm dead-man switch
+
+
+@dataclass(frozen=True)
 class SystemState:
+    """The immutable snapshot the GUI reads and the control loop replaces.
+
+    Nothing in ``core`` mutates a ``SystemState``. Each tick, the outer
+    control loop builds the next one with ``dataclasses.replace()``, folding
+    in whatever a state machine's result (e.g. ``engagement.StepResult``)
+    says should change. ``tracks`` is a tuple for the same reason: a plain
+    list is still a mutable container even when its elements are frozen,
+    and the GUI thread reads this snapshot while the control worker
+    produces the next one.
+    """
+
     stage: Stage
     mode: Mode
     engagement: EngagementState
     active_layer: Layer
     layer_manual_override: bool
     fallback_reason: ReasonCode | None
-    tracks: list[Track]
+    tracks: tuple[Track, ...]
     selected_track_id: int | None
+    attempts: dict[int, int]  # track_id -> engagement attempts so far
+    commanded_pan_deg: float | None
+    commanded_tilt_deg: float | None
     telemetry: Telemetry | None
     last_self_test: SelfTestResult | None

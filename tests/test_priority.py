@@ -18,7 +18,6 @@ def make_track(track_id: int, risk_score: float) -> Track:
         risk_score=risk_score,
         frames_confirmed=5,
         last_seen_t=0.0,
-        engagement_attempts=0,
     )
 
 

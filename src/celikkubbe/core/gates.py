@@ -76,8 +76,22 @@ class AngleGate:
         current_tilt_deg: float,
         target_pan_deg: float,
         target_tilt_deg: float,
+        commanded_pan_deg: float | None,
+        commanded_tilt_deg: float | None,
         tolerance_deg: float = config.ANGLE_TOLERANCE_DEG,
+        setpoint_ack_epsilon_deg: float = config.SETPOINT_ACK_EPSILON_DEG,
     ) -> tuple[bool, ReasonCode | None]:
+        # telemetry's echoed setpoint (target_*) can still hold the *previous*
+        # Goto for a few ticks after a new one is sent — the turret reads as
+        # settled on stale data. Refuse to pass until telemetry has echoed
+        # back the angle we actually last commanded.
+        if (
+            commanded_pan_deg is None
+            or commanded_tilt_deg is None
+            or abs(target_pan_deg - commanded_pan_deg) > setpoint_ack_epsilon_deg
+            or abs(target_tilt_deg - commanded_tilt_deg) > setpoint_ack_epsilon_deg
+        ):
+            return False, ReasonCode.SETPOINT_NOT_ACKED
         pan_error = abs(current_pan_deg - target_pan_deg)
         tilt_error = abs(current_tilt_deg - target_tilt_deg)
         if pan_error <= tolerance_deg and tilt_error <= tolerance_deg:
@@ -117,6 +131,8 @@ class GateContext:
     current_tilt_deg: float
     target_pan_deg: float
     target_tilt_deg: float
+    commanded_pan_deg: float | None
+    commanded_tilt_deg: float | None
 
 
 def evaluate_all(ctx: GateContext) -> list[ReasonCode]:
@@ -131,6 +147,8 @@ def evaluate_all(ctx: GateContext) -> list[ReasonCode]:
             ctx.current_tilt_deg,
             ctx.target_pan_deg,
             ctx.target_tilt_deg,
+            ctx.commanded_pan_deg,
+            ctx.commanded_tilt_deg,
         ),
         LimitGate.evaluate(ctx.target_pan_deg, ctx.target_tilt_deg),
     )

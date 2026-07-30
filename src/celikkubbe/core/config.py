@@ -15,10 +15,15 @@ TELEMETRY_STALE_MS = 300  # PC-side: UI shows "LINK LOST" past this
 
 # --- motion ---
 ANGLE_TOLERANCE_DEG = 0.10  # servo settling; S4 -> S5 condition
+SETPOINT_ACK_EPSILON_DEG = 0.01  # telemetry's echoed setpoint vs last commanded Goto
 BACKOFF_DEG = 0.50  # retreat distance before final approach
 UNIDIRECTIONAL_APPROACH = True  # always settle from the same side (pan gear backlash)
 PAN_LIMIT_DEG = (-170.0, 170.0)  # cable wrap limit
 TILT_LIMIT_DEG = (-20.0, 60.0)
+# Placeholder aim trajectory profile used by engagement.py's S4_AIM Goto;
+# tune once the STM32 trajectory generator is characterised.
+AIM_MAX_VEL_DPS = 90.0
+AIM_MAX_ACCEL_DPS2 = 180.0
 
 # --- health ---
 INFERENCE_WARN_MS = 50

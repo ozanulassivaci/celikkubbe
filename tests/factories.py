@@ -24,7 +24,6 @@ def make_track(
     iff: IFF = IFF.HOSTILE,
     status: TrackStatus = TrackStatus.CONFIRMED,
     risk_score: float = 50.0,
-    engagement_attempts: int = 0,
 ) -> Track:
     return Track(
         track_id=track_id,
@@ -38,7 +37,6 @@ def make_track(
         risk_score=risk_score,
         frames_confirmed=5,
         last_seen_t=0.0,
-        engagement_attempts=engagement_attempts,
     )
 
 
@@ -82,8 +80,11 @@ def make_state(
     active_layer: Layer = Layer.L1,
     layer_manual_override: bool = False,
     fallback_reason=None,
-    tracks: list[Track] | None = None,
+    tracks: tuple[Track, ...] | None = None,
     selected_track_id: int | None = None,
+    attempts: dict[int, int] | None = None,
+    commanded_pan_deg: float | None = None,
+    commanded_tilt_deg: float | None = None,
     telemetry: Telemetry | None = None,
     last_self_test=None,
 ) -> SystemState:
@@ -94,8 +95,11 @@ def make_state(
         active_layer=active_layer,
         layer_manual_override=layer_manual_override,
         fallback_reason=fallback_reason,
-        tracks=tracks if tracks is not None else [],
+        tracks=tracks if tracks is not None else (),
         selected_track_id=selected_track_id,
+        attempts=attempts if attempts is not None else {},
+        commanded_pan_deg=commanded_pan_deg,
+        commanded_tilt_deg=commanded_tilt_deg,
         telemetry=telemetry,
         last_self_test=last_self_test,
     )

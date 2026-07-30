@@ -97,15 +97,56 @@ def test_confidence_gate_boundary() -> None:
 
 
 def test_angle_gate_boundary_passes_at_tolerance() -> None:
-    passed, reason = AngleGate.evaluate(0.0, 0.0, config.ANGLE_TOLERANCE_DEG, 0.0)
+    # Setpoint already acked (commanded == echoed target); only the
+    # settling tolerance is under test here.
+    passed, reason = AngleGate.evaluate(
+        0.0, 0.0, config.ANGLE_TOLERANCE_DEG, 0.0, config.ANGLE_TOLERANCE_DEG, 0.0
+    )
     assert passed is True
     assert reason is None
 
 
 def test_angle_gate_boundary_fails_past_tolerance() -> None:
-    passed, reason = AngleGate.evaluate(0.0, 0.0, config.ANGLE_TOLERANCE_DEG + 0.01, 0.0)
+    passed, reason = AngleGate.evaluate(
+        0.0, 0.0, config.ANGLE_TOLERANCE_DEG + 0.01, 0.0, config.ANGLE_TOLERANCE_DEG + 0.01, 0.0
+    )
     assert passed is False
     assert reason is ReasonCode.ANGLE_NOT_SETTLED
+
+
+def test_angle_gate_rejects_stale_echoed_setpoint() -> None:
+    # telemetry still echoes the previous Goto (target_pan_deg=0.0); we last
+    # commanded 10.0. The turret happens to be settled at 0.0, which would
+    # spuriously pass a naive tolerance check.
+    passed, reason = AngleGate.evaluate(
+        current_pan_deg=0.0,
+        current_tilt_deg=0.0,
+        target_pan_deg=0.0,
+        target_tilt_deg=0.0,
+        commanded_pan_deg=10.0,
+        commanded_tilt_deg=0.0,
+    )
+    assert passed is False
+    assert reason is ReasonCode.SETPOINT_NOT_ACKED
+
+
+def test_angle_gate_rejects_when_nothing_commanded_yet() -> None:
+    passed, reason = AngleGate.evaluate(0.0, 0.0, 0.0, 0.0, None, None)
+    assert passed is False
+    assert reason is ReasonCode.SETPOINT_NOT_ACKED
+
+
+def test_angle_gate_passes_once_echoed_setpoint_matches_within_epsilon() -> None:
+    passed, reason = AngleGate.evaluate(
+        current_pan_deg=10.0,
+        current_tilt_deg=0.0,
+        target_pan_deg=10.0 + config.SETPOINT_ACK_EPSILON_DEG,
+        target_tilt_deg=0.0,
+        commanded_pan_deg=10.0,
+        commanded_tilt_deg=0.0,
+    )
+    assert passed is True
+    assert reason is None
 
 
 def test_limit_gate_within_bounds() -> None:
@@ -144,6 +185,8 @@ def test_evaluate_all_returns_every_gates_failure() -> None:
         current_tilt_deg=0.0,
         target_pan_deg=200.0,
         target_tilt_deg=0.0,
+        commanded_pan_deg=200.0,
+        commanded_tilt_deg=0.0,
     )
     reasons = evaluate_all(ctx)
     assert reasons == [
@@ -171,6 +214,8 @@ def test_evaluate_all_safety_gate_reports_not_armed_in_isolation() -> None:
         current_tilt_deg=5.0,
         target_pan_deg=5.0,
         target_tilt_deg=5.0,
+        commanded_pan_deg=5.0,
+        commanded_tilt_deg=5.0,
     )
     assert evaluate_all(ctx) == [ReasonCode.NOT_ARMED]
 
@@ -190,5 +235,7 @@ def test_evaluate_all_passes_with_no_failures() -> None:
         current_tilt_deg=5.0,
         target_pan_deg=5.0,
         target_tilt_deg=5.0,
+        commanded_pan_deg=5.0,
+        commanded_tilt_deg=5.0,
     )
     assert evaluate_all(ctx) == []
