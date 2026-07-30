@@ -27,6 +27,7 @@ REASON_CODE_TR: dict[ReasonCode, str] = {
     ReasonCode.DEPTH_UNRELIABLE: "Derinlik verisi guvenilir degil",
     ReasonCode.OPERATOR_OVERRIDE: "Operator mudahalesi",
     ReasonCode.SETPOINT_NOT_ACKED: "Komut edilen aci henuz dogrulanmadi",
+    ReasonCode.NO_AIM_SOLUTION: "Hedef icin nisan cozumu yok",
 }
 
 

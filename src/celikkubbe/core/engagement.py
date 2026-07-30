@@ -13,6 +13,15 @@ arm switch (a continuous dead-man switch: releasing it before the shot is
 taken aborts back to S3) and to request fire on that tick. There is exactly
 one path to a ``Fire`` command, so "never fire without passing every gate"
 only needs to be true in one place.
+
+``step()`` chooses which track to engage (S3 -> S4, via prioritisation), so
+the aim solution for the *selected* track cannot be computed by the outer
+layer ahead of time without predicting that choice — and both ways of
+predicting it are broken (a stale previous-tick selection lags by a frame;
+re-running priority.py in the outer layer duplicates the selection logic
+and can silently diverge from step()'s own hysteresis state). Instead the
+outer layer computes a solution for every confirmed track and hands over
+the whole map; step() looks up the one it selected.
 """
 
 from __future__ import annotations
@@ -99,7 +108,7 @@ def step(
     telemetry: Telemetry | None,
     hit_result: HitResult | None,
     operator: OperatorInput | None,
-    aim_target_deg: tuple[float, float] | None,
+    aim_solutions: dict[int, tuple[float, float]],
     now: float,
 ) -> StepResult:
     current = state.engagement
@@ -168,25 +177,29 @@ def step(
             commanded_tilt_deg = None
             return finish(EngagementState.S3_TRACK)
 
-        if aim_target_deg is not None:
-            new_pan, new_tilt = aim_target_deg
-            unacked = (
-                commanded_pan_deg is None
-                or commanded_tilt_deg is None
-                or abs(new_pan - commanded_pan_deg) > config.SETPOINT_ACK_EPSILON_DEG
-                or abs(new_tilt - commanded_tilt_deg) > config.SETPOINT_ACK_EPSILON_DEG
-            )
-            if unacked:
-                commands.append(
-                    Goto(
-                        az_deg=new_pan,
-                        el_deg=new_tilt,
-                        max_vel_dps=config.AIM_MAX_VEL_DPS,
-                        max_accel_dps2=config.AIM_MAX_ACCEL_DPS2,
-                    )
+        solution = aim_solutions.get(target.track_id)
+        if solution is None:
+            fallback_reason = ReasonCode.NO_AIM_SOLUTION
+            return finish(EngagementState.S4_AIM)
+
+        new_pan, new_tilt = solution
+        unacked = (
+            commanded_pan_deg is None
+            or commanded_tilt_deg is None
+            or abs(new_pan - commanded_pan_deg) > config.SETPOINT_ACK_EPSILON_DEG
+            or abs(new_tilt - commanded_tilt_deg) > config.SETPOINT_ACK_EPSILON_DEG
+        )
+        if unacked:
+            commands.append(
+                Goto(
+                    az_deg=new_pan,
+                    el_deg=new_tilt,
+                    max_vel_dps=config.AIM_MAX_VEL_DPS,
+                    max_accel_dps2=config.AIM_MAX_ACCEL_DPS2,
                 )
-                commanded_pan_deg = new_pan
-                commanded_tilt_deg = new_tilt
+            )
+            commanded_pan_deg = new_pan
+            commanded_tilt_deg = new_tilt
 
         if telemetry is None:
             return finish(EngagementState.S4_AIM)
