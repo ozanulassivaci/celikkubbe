@@ -163,6 +163,10 @@ class Track:
 
 @dataclass(frozen=True)
 class Telemetry:
+    # PC-side receive timestamp, taken from the injected Clock when this
+    # packet is parsed — not an MCU clock reading. The two time bases are
+    # unsynchronised; if the MCU's own timestamp is ever needed, it belongs
+    # in a separate `mcu_t` field, never compared directly against `now`.
     t: float
     pan_deg: float
     tilt_deg: float

@@ -14,9 +14,13 @@ from celikkubbe.core.types import Mode, SelfTestResult, Telemetry
 
 
 def _link_timed_out(telemetry: Telemetry | None, now: float) -> bool:
+    # TELEMETRY_STALE_MS (300ms), not WATCHDOG_TIMEOUT_MS (200ms): the 200ms
+    # figure is the MCU's own budget for safing itself. Using it here would
+    # race the MCU and drop to M4 on ordinary PC-side scheduling jitter; the
+    # PC should notice slightly later than the MCU acts, not simultaneously.
     if telemetry is None:
         return True
-    return (now - telemetry.t) * 1000.0 > config.WATCHDOG_TIMEOUT_MS
+    return (now - telemetry.t) * 1000.0 > config.TELEMETRY_STALE_MS
 
 
 def _driver_alarm(telemetry: Telemetry | None) -> bool:

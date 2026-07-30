@@ -62,14 +62,24 @@ def test_estop_drives_m4_from_m3() -> None:
 
 def test_watchdog_timeout_drives_m4() -> None:
     telemetry = make_telemetry(t=0.0)
-    now = config.WATCHDOG_TIMEOUT_MS / 1000.0 + 0.01
+    now = config.TELEMETRY_STALE_MS / 1000.0 + 0.01
     mode, _ = modes.step(Mode.M3_OPERATIONAL, telemetry, None, True, None, False, now=now)
     assert mode is Mode.M4_SAFE
 
 
 def test_fresh_telemetry_does_not_trigger_watchdog() -> None:
     telemetry = make_telemetry(t=0.0)
-    now = config.WATCHDOG_TIMEOUT_MS / 1000.0 - 0.01
+    now = config.TELEMETRY_STALE_MS / 1000.0 - 0.01
+    mode, _ = modes.step(Mode.M3_OPERATIONAL, telemetry, None, True, None, False, now=now)
+    assert mode is Mode.M3_OPERATIONAL
+
+
+def test_watchdog_uses_telemetry_stale_not_mcu_watchdog_budget() -> None:
+    # The MCU's own 200ms safing budget (WATCHDOG_TIMEOUT_MS) must not drive
+    # this transition, or the PC races the MCU and drops to M4 on ordinary
+    # scheduling jitter between 200ms and 300ms.
+    telemetry = make_telemetry(t=0.0)
+    now = config.WATCHDOG_TIMEOUT_MS / 1000.0 + 0.01
     mode, _ = modes.step(Mode.M3_OPERATIONAL, telemetry, None, True, None, False, now=now)
     assert mode is Mode.M3_OPERATIONAL
 
