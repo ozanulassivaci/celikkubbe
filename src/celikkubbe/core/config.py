@@ -69,7 +69,9 @@ CLASS_PRIORITY: dict[TargetClass, int] = {
     TargetClass.BALLOON: 20,
 }
 WEIGHT_CLASS, WEIGHT_RANGE, WEIGHT_CONFIDENCE = 0.5, 0.3, 0.2
-MAX_ENGAGEMENT_RANGE_M = 15.0  # far reference for the range score; matches RANGE_RULES
+# Far reference for the range score; derived so RANGE_RULES stays the only
+# source of truth for engagement range limits.
+MAX_ENGAGEMENT_RANGE_M = max(hi for _, hi in RANGE_RULES.values())
 
 # --- UI stability ---
 TRACK_LIST_UPDATE_HZ = 10
