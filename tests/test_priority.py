@@ -11,6 +11,7 @@ def make_track(track_id: int, risk_score: float) -> Track:
         cls=TargetClass.UAV,
         confidence=0.9,
         range_m=5.0,
+        range_source="depth",
         iff=IFF.HOSTILE,
         bbox=(0.0, 0.0, 0.1, 0.1),
         velocity=(0.0, 0.0),

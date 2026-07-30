@@ -10,6 +10,13 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Literal
 
+# bbox / roi convention used everywhere in this codebase: normalised
+# (x1, y1, x2, y2) — min corner then max corner, each in [0, 1]. Never
+# (cx, cy, w, h), and never pixels.
+BoundingBox = tuple[float, float, float, float]
+
+RangeSource = Literal["depth", "size", "none"]
+
 
 class Stage(Enum):
     STAGE_1 = "STAGE_1"
@@ -126,15 +133,24 @@ class Frame:
     t: float
     intrinsics: CameraIntrinsics
     has_depth: bool
+    # Float array in METRES when present, same pixel grid as `image`.
+    # 0.0 or NaN marks an invalid pixel (D435i dropout, out of range, ...).
+    # Whoever produces a Frame is responsible for applying the sensor's
+    # depth scale before it lands here — nothing downstream may assume a
+    # raw sensor unit.
     depth: Any | None = None
 
 
 @dataclass(frozen=True)
 class Detection:
-    bbox: tuple[float, float, float, float]
+    bbox: BoundingBox
     cls: TargetClass | None
     confidence: float
     range_m: float | None
+    # How range_m was derived. Depth is trustworthy; a size-based estimate
+    # from a known real-world diameter is coarse and stage 3's range gate
+    # should weight it with less confidence; "none" means range_m is None.
+    range_source: RangeSource
     source_layer: Layer
     iff: IFF
 
@@ -153,8 +169,9 @@ class Track:
     cls: TargetClass | None
     confidence: float
     range_m: float | None
+    range_source: RangeSource
     iff: IFF
-    bbox: tuple[float, float, float, float]
+    bbox: BoundingBox
     velocity: tuple[float, float]
     status: TrackStatus
     risk_score: float

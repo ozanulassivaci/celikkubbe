@@ -3,6 +3,7 @@ from __future__ import annotations
 from celikkubbe.core.types import (
     IFF,
     CameraIntrinsics,
+    Detection,
     EngagementState,
     Layer,
     Mode,
@@ -66,6 +67,7 @@ def test_track_is_frozen() -> None:
         cls=TargetClass.UAV,
         confidence=0.9,
         range_m=8.0,
+        range_source="depth",
         iff=IFF.HOSTILE,
         bbox=(0.1, 0.1, 0.2, 0.2),
         velocity=(0.0, 0.0),
@@ -88,6 +90,7 @@ def test_system_state_holds_tracks() -> None:
         cls=TargetClass.UAV,
         confidence=0.9,
         range_m=8.0,
+        range_source="depth",
         iff=IFF.HOSTILE,
         bbox=(0.1, 0.1, 0.2, 0.2),
         velocity=(0.0, 0.0),
@@ -137,6 +140,20 @@ def test_system_state_is_frozen() -> None:
         pass
     else:
         raise AssertionError("SystemState must be immutable")
+
+
+def test_detection_carries_range_source() -> None:
+    detection = Detection(
+        bbox=(0.1, 0.1, 0.2, 0.2),
+        cls=None,
+        confidence=0.8,
+        range_m=None,
+        range_source="none",
+        source_layer=Layer.L2,
+        iff=IFF.UNKNOWN,
+    )
+    assert detection.range_source == "none"
+    assert detection.cls is None
 
 
 def test_operator_input_defaults_are_safe() -> None:
