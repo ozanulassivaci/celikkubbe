@@ -33,11 +33,11 @@ select = ["E", "F", "I", "UP", "B"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "--cov=celikkubbe.core --cov=celikkubbe.vision --cov=celikkubbe.tracking --cov-report=term-missing"
+addopts = "--cov=celikkubbe.core --cov=celikkubbe.vision --cov=celikkubbe.tracking --cov=celikkubbe.demos --cov-report=term-missing"
 
 [tool.coverage.run]
 branch = true
-source = ["celikkubbe.core", "celikkubbe.vision", "celikkubbe.tracking"]
+source = ["celikkubbe.core", "celikkubbe.vision", "celikkubbe.tracking", "celikkubbe.demos"]
 
 [tool.coverage.report]
 fail_under = 90
