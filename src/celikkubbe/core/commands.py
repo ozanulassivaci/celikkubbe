@@ -68,6 +68,4 @@ class SetParam:
     value: float
 
 
-Command = (
-    SetMode | Goto | Jog | SetVelocity | Home | Arm | Disarm | Fire | SoftEstop | SetParam
-)
+Command = SetMode | Goto | Jog | SetVelocity | Home | Arm | Disarm | Fire | SoftEstop | SetParam

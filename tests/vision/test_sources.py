@@ -130,9 +130,7 @@ def test_synthetic_source_apparent_size_follows_pinhole_model() -> None:
 
 
 def test_synthetic_source_explicit_targets_override_num_targets() -> None:
-    targets = (
-        SyntheticTarget(color_hex=FRIENDLY_HEX, size_m=0.5, lane_fraction=0.3, range_m=8.0),
-    )
+    targets = (SyntheticTarget(color_hex=FRIENDLY_HEX, size_m=0.5, lane_fraction=0.3, range_m=8.0),)
     cfg = SyntheticSourceConfig(num_targets=5, targets=targets)
     assert cfg.resolve_targets() == targets
 
