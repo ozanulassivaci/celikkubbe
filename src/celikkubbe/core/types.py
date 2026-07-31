@@ -91,11 +91,9 @@ class ReasonCode(Enum):
     ESTOP_ACTIVE = "ESTOP_ACTIVE"
     POSITION_INVALID = "POSITION_INVALID"
     TARGET_FRIENDLY = "TARGET_FRIENDLY"
-    CLASS_UNKNOWN = "CLASS_UNKNOWN"
     RANGE_UNKNOWN = "RANGE_UNKNOWN"
     RANGE_OUT_OF_BOUNDS = "RANGE_OUT_OF_BOUNDS"
     LOW_CONFIDENCE = "LOW_CONFIDENCE"
-    ANGLE_NOT_SETTLED = "ANGLE_NOT_SETTLED"
     LIMIT_EXCEEDED = "LIMIT_EXCEEDED"
     INFERENCE_SLOW = "INFERENCE_SLOW"
     CAMERA_TIMEOUT = "CAMERA_TIMEOUT"
@@ -104,6 +102,9 @@ class ReasonCode(Enum):
     OPERATOR_OVERRIDE = "OPERATOR_OVERRIDE"
     SETPOINT_NOT_ACKED = "SETPOINT_NOT_ACKED"
     NO_AIM_SOLUTION = "NO_AIM_SOLUTION"
+    MOTION_IN_PROGRESS = "MOTION_IN_PROGRESS"
+    DRIVER_ALARM = "DRIVER_ALARM"
+    IFF_UNKNOWN = "IFF_UNKNOWN"
 
 
 @dataclass(frozen=True)
@@ -186,13 +187,25 @@ class Telemetry:
     # unsynchronised; if the MCU's own timestamp is ever needed, it belongs
     # in a separate `mcu_t` field, never compared directly against `now`.
     t: float
+    # pan_deg / tilt_deg are the MCU's COMMANDED position, integrated from
+    # the step pulses it has issued — NOT a measured position. The motor
+    # encoders wire to the stepper drivers, which close the position loop
+    # internally; the MCU never sees them. Reading these as "where the
+    # turret actually is" is easy to get away with on the bench and wrong
+    # the moment a motor stalls or loses steps. The only evidence that a
+    # commanded move actually completed is `motion_complete` plus a clear
+    # driver alarm — see AngleGate.
     pan_deg: float
     tilt_deg: float
     pan_vel_dps: float
     tilt_vel_dps: float
     target_pan_deg: float
     target_tilt_deg: float
-    following_error_deg: float
+    # True once the MCU's trajectory generator reports the current move
+    # finished. There is no independent following-error measurement to
+    # cross-check this against (see pan_deg/tilt_deg above), so it is
+    # taken as-is.
+    motion_complete: bool
     armed: bool
     estop: bool
     # False after an e-stop: the 48V rail is cut, unpowered steppers only

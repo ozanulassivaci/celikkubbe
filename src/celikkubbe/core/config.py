@@ -14,7 +14,12 @@ WATCHDOG_TIMEOUT_MS = 200  # MCU safes the turret if no heartbeat arrives
 TELEMETRY_STALE_MS = 300  # PC-side: UI shows "LINK LOST" past this
 
 # --- motion ---
-ANGLE_TOLERANCE_DEG = 0.10  # servo settling; S4 -> S5 condition
+# Conceptual servo settling tolerance. No longer evaluated directly by
+# AngleGate: the MCU's trajectory generator (which this value is meant to
+# configure once SetParam wiring exists) is the sole authority on
+# Telemetry.motion_complete, since the MCU has no measured position to
+# check a delta against — see Telemetry.pan_deg/tilt_deg.
+ANGLE_TOLERANCE_DEG = 0.10
 SETPOINT_ACK_EPSILON_DEG = 0.01  # telemetry's echoed setpoint vs last commanded Goto
 BACKOFF_DEG = 0.50  # retreat distance before final approach
 UNIDIRECTIONAL_APPROACH = True  # always settle from the same side (pan gear backlash)

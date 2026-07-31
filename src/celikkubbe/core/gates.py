@@ -31,13 +31,17 @@ class SafetyGate:
 
 class IFFGate:
     @staticmethod
-    def evaluate(iff: IFF, cls: TargetClass | None) -> tuple[bool, ReasonCode | None]:
+    def evaluate(iff: IFF) -> tuple[bool, ReasonCode | None]:
+        # Competition targets are colour-coded (hostile red, friendly
+        # blue), so L2 can determine IFF directly from colour even though
+        # it can never determine class. Class absence is RangeGate's
+        # problem (it blocks the Stage 3 range rule), not this gate's.
         if iff is IFF.FRIENDLY:
             return False, ReasonCode.TARGET_FRIENDLY
-        if cls is None:
-            # Conservative default: L2 never produces a class, so an
-            # unclassified target must never be engaged automatically.
-            return False, ReasonCode.CLASS_UNKNOWN
+        if iff is IFF.UNKNOWN:
+            # Conservative default: an IFF that could not be determined at
+            # all must never be engaged automatically.
+            return False, ReasonCode.IFF_UNKNOWN
         return True, None
 
 
@@ -73,21 +77,33 @@ class ConfidenceGate:
 
 
 class AngleGate:
+    """Whether the turret has actually finished moving to where we last aimed.
+
+    There is no measured position to compare against (see the docstring
+    on ``Telemetry.pan_deg``/``tilt_deg``): the motor encoders are wired to
+    the stepper drivers, which close the position loop internally, and
+    the MCU only knows how many step pulses it issued. So "settled" can
+    no longer be computed as an angle delta — it is reported by the MCU
+    directly via ``motion_complete``, and this gate's job is to make sure
+    that report is trustworthy: the echoed setpoint must match what we
+    actually last commanded, and no driver alarm may be active.
+    """
+
     @staticmethod
     def evaluate(
-        current_pan_deg: float,
-        current_tilt_deg: float,
         target_pan_deg: float,
         target_tilt_deg: float,
         commanded_pan_deg: float | None,
         commanded_tilt_deg: float | None,
-        tolerance_deg: float = config.ANGLE_TOLERANCE_DEG,
+        motion_complete: bool,
+        driver_alarm_pan: bool,
+        driver_alarm_tilt: bool,
         setpoint_ack_epsilon_deg: float = config.SETPOINT_ACK_EPSILON_DEG,
     ) -> tuple[bool, ReasonCode | None]:
         # telemetry's echoed setpoint (target_*) can still hold the *previous*
-        # Goto for a few ticks after a new one is sent — the turret reads as
-        # settled on stale data. Refuse to pass until telemetry has echoed
-        # back the angle we actually last commanded.
+        # Goto for a few ticks after a new one is sent — motion_complete
+        # could read True against stale data. Refuse to pass until telemetry
+        # has echoed back the angle we actually last commanded.
         if (
             commanded_pan_deg is None
             or commanded_tilt_deg is None
@@ -95,11 +111,11 @@ class AngleGate:
             or abs(target_tilt_deg - commanded_tilt_deg) > setpoint_ack_epsilon_deg
         ):
             return False, ReasonCode.SETPOINT_NOT_ACKED
-        pan_error = abs(current_pan_deg - target_pan_deg)
-        tilt_error = abs(current_tilt_deg - target_tilt_deg)
-        if pan_error <= tolerance_deg and tilt_error <= tolerance_deg:
-            return True, None
-        return False, ReasonCode.ANGLE_NOT_SETTLED
+        if driver_alarm_pan or driver_alarm_tilt:
+            return False, ReasonCode.DRIVER_ALARM
+        if not motion_complete:
+            return False, ReasonCode.MOTION_IN_PROGRESS
+        return True, None
 
 
 class LimitGate:
@@ -130,28 +146,30 @@ class GateContext:
     cls: TargetClass | None
     range_m: float | None
     confidence: float
-    current_pan_deg: float
-    current_tilt_deg: float
     target_pan_deg: float
     target_tilt_deg: float
     commanded_pan_deg: float | None
     commanded_tilt_deg: float | None
+    motion_complete: bool
+    driver_alarm_pan: bool
+    driver_alarm_tilt: bool
 
 
 def evaluate_all(ctx: GateContext) -> list[ReasonCode]:
     """Run every gate and return every failing reason, in gate-list order."""
     results = (
         SafetyGate.evaluate(ctx.mode, ctx.armed, ctx.estop, ctx.position_valid),
-        IFFGate.evaluate(ctx.iff, ctx.cls),
+        IFFGate.evaluate(ctx.iff),
         RangeGate.evaluate(ctx.cls, ctx.range_m, ctx.stage),
         ConfidenceGate.evaluate(ctx.confidence),
         AngleGate.evaluate(
-            ctx.current_pan_deg,
-            ctx.current_tilt_deg,
             ctx.target_pan_deg,
             ctx.target_tilt_deg,
             ctx.commanded_pan_deg,
             ctx.commanded_tilt_deg,
+            ctx.motion_complete,
+            ctx.driver_alarm_pan,
+            ctx.driver_alarm_tilt,
         ),
         LimitGate.evaluate(ctx.target_pan_deg, ctx.target_tilt_deg),
     )

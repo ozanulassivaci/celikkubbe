@@ -93,12 +93,13 @@ def _build_gate_context(
         cls=track.cls,
         range_m=track.range_m,
         confidence=track.confidence,
-        current_pan_deg=telemetry.pan_deg,
-        current_tilt_deg=telemetry.tilt_deg,
         target_pan_deg=telemetry.target_pan_deg,
         target_tilt_deg=telemetry.target_tilt_deg,
         commanded_pan_deg=commanded_pan_deg,
         commanded_tilt_deg=commanded_tilt_deg,
+        motion_complete=telemetry.motion_complete,
+        driver_alarm_pan=telemetry.driver_alarm_pan,
+        driver_alarm_tilt=telemetry.driver_alarm_tilt,
     )
 
 
