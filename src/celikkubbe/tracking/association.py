@@ -61,15 +61,26 @@ def associate(
     max_displacement: float = MAX_ASSOCIATION_DISPLACEMENT,
     track_groups: list[object] | None = None,
     detection_groups: list[object] | None = None,
+    hard_gate_groups: frozenset[object] | None = None,
+    group_mismatch_cost: float = 0.0,
 ) -> tuple[list[tuple[int, int]], list[int], list[int]]:
     """Match predicted track boxes against this frame's detection boxes.
 
-    ``track_groups``/``detection_groups`` add a second, hard eligibility
-    gate alongside distance: when both are given, a pair is only eligible
-    if ``track_groups[i] == detection_groups[j]``. This is deliberately
-    generic (any comparable label, not just IFF) — the caller decides
-    what "must not cross-absorb" means; a red track must never absorb a
-    blue detection is simply the first use of it.
+    ``track_groups``/``detection_groups`` add a second gate alongside
+    distance, generic (any comparable label, not just IFF) — the caller
+    decides what a "group" means. The gate is asymmetric by design: for a
+    track whose group is in ``hard_gate_groups``, a mismatched detection is
+    ineligible outright. For every other track, a mismatch only adds
+    ``group_mismatch_cost`` to that pair's cost — it can still win the
+    match if nothing better is available, but loses to any same-group
+    candidate. This matters because a hard gate both ways would be
+    fragile: one bad colour reading (specular highlight, motion blur)
+    would permanently strand a track under a new, wrong label with no way
+    back. A track already confirmed as belonging to a hard-gated group
+    (e.g. FRIENDLY, once fail-safe voting has committed to it) must never
+    un-commit, but a track that has *not* made that commitment should
+    tolerate an occasional conflicting reading rather than losing its
+    identity over it.
 
     Returns ``(matches, unmatched_track_indices, unmatched_detection_indices)``
     where ``matches`` is a list of ``(track_index, detection_index)`` pairs.
@@ -85,14 +96,17 @@ def associate(
         for j, det_bbox in enumerate(detection_bboxes):
             if _centroid_distance(track_bbox, det_bbox) > max_displacement:
                 continue
+            pair_cost = 1.0 - iou(track_bbox, det_bbox)
             if (
                 track_groups is not None
                 and detection_groups is not None
                 and track_groups[i] != detection_groups[j]
             ):
-                continue
+                if hard_gate_groups is not None and track_groups[i] in hard_gate_groups:
+                    continue
+                pair_cost += group_mismatch_cost
             eligible[i, j] = True
-            cost[i, j] = 1.0 - iou(track_bbox, det_bbox)
+            cost[i, j] = pair_cost
 
     row_idx, col_idx = linear_sum_assignment(cost)
 

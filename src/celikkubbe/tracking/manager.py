@@ -31,6 +31,11 @@ from celikkubbe.tracking.kalman import (
 
 CLASS_VOTE_WINDOW = 10
 IFF_VOTE_WINDOW = 5  # Stage 3 IFF refresh cadence; see IFFGate
+# Association cost penalty for a track/detection colour mismatch, applied
+# only to tracks not yet fail-safe-committed to FRIENDLY (see
+# TrackManager.update). Tuned so a mismatched detection loses to any
+# reasonable same-colour candidate but still beats no match at all.
+COLOR_MISMATCH_COST = 0.5
 
 
 def _bbox_size(bbox: BoundingBox) -> tuple[float, float]:
@@ -142,12 +147,14 @@ class TrackManager:
         predicted_bboxes = [self._tracks[tid].predicted_bbox() for tid in track_ids]
         detection_bboxes = [d.bbox for d in detections]
         # Gate on the fail-safe *voted* IFF, not the single most recent
-        # detection's colour: a track that has ever shown a FRIENDLY frame
-        # stays gated as FRIENDLY for association too, consistent with the
-        # same fail-safe reasoning behind Track.iff itself. The
-        # alternative — gating on the latest raw colour — would let one
-        # HOSTILE-coloured measurement immediately re-open a track that
-        # fail-safe voting has already decided to protect.
+        # detection's colour, and asymmetrically: FRIENDLY is hard-gated
+        # (fail-safe voting has committed to it and must never un-commit),
+        # everything else is only soft-penalised. A hard gate both ways
+        # would be fragile — a single bad blue reading (specular
+        # highlight, motion blur, momentary overlap) would permanently
+        # strand a genuine hostile track under a new ID, and identity
+        # churn resets FSM-owned bookkeeping keyed by that ID (engagement
+        # attempts, deferrals) that has nothing to do with tracking.
         track_groups = [self._tracks[tid]._voted_iff() for tid in track_ids]
         detection_groups = [d.iff for d in detections]
 
@@ -156,6 +163,8 @@ class TrackManager:
             detection_bboxes,
             track_groups=track_groups,
             detection_groups=detection_groups,
+            hard_gate_groups=frozenset({IFF.FRIENDLY}),
+            group_mismatch_cost=COLOR_MISMATCH_COST,
             **self._association_kwargs,
         )
 

@@ -118,42 +118,69 @@ def test_class_voting_resists_a_single_misclassified_frame() -> None:
     assert tracks[0].cls is TargetClass.UAV
 
 
-def test_friendly_frame_within_window_keeps_track_friendly() -> None:
-    # Colour-gated association (below) means a track can no longer be fed
-    # a conflicting-colour *detection* through update() and stay the same
-    # track — a HOSTILE-coloured measurement is, correctly, a different
-    # track now. So the voting/aging behaviour itself is exercised at the
-    # state level directly, decoupled from association.
-    manager = TrackManager(FakeClock(), confirm_frames=1)
-    tracks = manager.update([make_detection(0.5, 0.5, iff=IFF.FRIENDLY)], now=0.0)
-    state = manager._tracks[tracks[0].track_id]
-    for _ in range(4):
-        state.iff_votes.append(IFF.HOSTILE)
-        assert state._voted_iff() is IFF.FRIENDLY
-
-
-def test_friendly_frame_ages_out_of_the_window_eventually() -> None:
-    manager = TrackManager(FakeClock(), confirm_frames=1)
-    tracks = manager.update([make_detection(0.5, 0.5, iff=IFF.FRIENDLY)], now=0.0)
-    state = manager._tracks[tracks[0].track_id]
-    for _ in range(10):
-        state.iff_votes.append(IFF.HOSTILE)
-    assert state._voted_iff() is IFF.HOSTILE
-
-
-def test_red_track_never_absorbs_a_blue_detection() -> None:
+def test_friendly_frame_flips_a_hostile_track_to_friendly() -> None:
+    # Association gates asymmetrically: a HOSTILE-voted track is only
+    # soft-gated, so a single conflicting-colour detection can still land
+    # on it (there's nothing better available) rather than being forced
+    # onto a brand new track. Fail-safe voting then does its job.
     manager = TrackManager(FakeClock(), confirm_frames=1)
     tracks = manager.update([make_detection(0.5, 0.5, iff=IFF.HOSTILE)], now=0.0)
     hostile_id = tracks[0].track_id
 
-    # A friendly-coloured detection at the exact same position must not
-    # match the existing hostile track; it must start a new one.
     tracks = manager.update([make_detection(0.5, 0.5, iff=IFF.FRIENDLY)], now=1.0)
+    assert len(tracks) == 1
+    assert tracks[0].track_id == hostile_id
+    assert tracks[0].iff is IFF.FRIENDLY
+
+
+def test_hostile_track_survives_a_single_blue_frame_with_id_and_attempts_intact() -> None:
+    # The whole point of the soft gate: identity survives a one-frame
+    # colour misread (specular highlight, motion blur, momentary overlap
+    # with another model), so FSM-owned bookkeeping keyed by track_id
+    # (engagement_attempts, deferrals — neither lives in tracking.py) is
+    # never invalidated by a spurious ID change.
+    manager = TrackManager(FakeClock(), confirm_frames=1)
+    tracks = manager.update([make_detection(0.5, 0.5, iff=IFF.HOSTILE)], now=0.0)
+    track_id = tracks[0].track_id
+    simulated_engagement_attempts = {track_id: 2}
+
+    tracks = manager.update([make_detection(0.5, 0.5, iff=IFF.FRIENDLY)], now=1.0)
+
+    assert len(tracks) == 1
+    assert tracks[0].track_id == track_id
+    assert simulated_engagement_attempts.get(tracks[0].track_id) == 2
+
+
+def test_friendly_track_never_reverts_to_hostile() -> None:
+    # Once fail-safe voting commits a track to FRIENDLY, it is hard-gated:
+    # a HOSTILE-coloured detection can never land on it again to erode
+    # the vote, so the commitment cannot be undone by more bad readings.
+    # track_lost_ms is generous here since the point under test is voting
+    # permanence, not coasting/lost lifecycle timing — the friendly track
+    # never gets re-matched (by design) and would otherwise time out.
+    manager = TrackManager(FakeClock(), confirm_frames=1, track_lost_ms=100_000.0)
+    tracks = manager.update([make_detection(0.5, 0.5, iff=IFF.FRIENDLY)], now=0.0)
+    friendly_id = tracks[0].track_id
+
+    for i in range(10):
+        tracks = manager.update([make_detection(0.5, 0.5, iff=IFF.HOSTILE)], now=float(i + 1))
+        friendly_track = next(t for t in tracks if t.track_id == friendly_id)
+        assert friendly_track.iff is IFF.FRIENDLY
+
+
+def test_friendly_track_never_absorbs_a_hostile_detection() -> None:
+    manager = TrackManager(FakeClock(), confirm_frames=1)
+    tracks = manager.update([make_detection(0.5, 0.5, iff=IFF.FRIENDLY)], now=0.0)
+    friendly_id = tracks[0].track_id
+
+    # A hostile-coloured detection at the exact same position must not
+    # match the existing friendly track; it must start a new one.
+    tracks = manager.update([make_detection(0.5, 0.5, iff=IFF.HOSTILE)], now=1.0)
     assert len(tracks) == 2
     ids = {t.track_id for t in tracks}
-    assert hostile_id in ids
-    new_track = next(t for t in tracks if t.track_id != hostile_id)
-    assert new_track.iff is IFF.FRIENDLY
+    assert friendly_id in ids
+    new_track = next(t for t in tracks if t.track_id != friendly_id)
+    assert new_track.iff is IFF.HOSTILE
 
 
 def test_emitted_tracks_are_frozen() -> None:
