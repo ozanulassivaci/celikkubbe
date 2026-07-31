@@ -21,9 +21,22 @@ from celikkubbe.core.types import CameraIntrinsics, Frame
 # an arbitrary webcam too).
 ASSUMED_HORIZONTAL_FOV_DEG = 69.0
 
-# BGR, since every source here hands out images in cv2's native channel order.
-_RED_BGR = (0, 0, 220)
 _BACKGROUND_BGR = (40, 40, 40)
+
+# Confirmed competition target colours (see vision/l2_color.py) and the
+# three known physical sizes, used to auto-generate a plausible mix of
+# targets when the caller does not specify one explicitly.
+HOSTILE_HEX = "#F50A0A"
+FRIENDLY_HEX = "#00A3E0"
+_DEFAULT_COLORS_HEX = (HOSTILE_HEX, FRIENDLY_HEX)
+_DEFAULT_SIZES_M = (0.30, 0.40, 0.50)
+
+
+def hex_to_bgr(hex_color: str) -> tuple[int, int, int]:
+    """Convert "#RRGGBB" to the (B, G, R) tuple cv2 drawing calls expect."""
+    h = hex_color.lstrip("#")
+    r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+    return (b, g, r)
 
 
 def estimated_intrinsics(
@@ -46,43 +59,81 @@ def estimated_intrinsics(
     )
 
 
+def _default_lanes(num_targets: int) -> tuple[float, ...]:
+    n = max(1, min(3, num_targets))
+    return tuple((i + 1) / (n + 1) for i in range(n))
+
+
+@dataclass(frozen=True)
+class SyntheticTarget:
+    """One rendered target: colour, true physical size, lane and motion."""
+
+    color_hex: str
+    size_m: float
+    lane_fraction: float  # normalised (0-1) y position
+    speed: float = 0.0  # normalised x-units per second
+    range_m: float = 10.0  # simulated distance -> apparent pixel size + depth
+    start_x: float = 0.0  # normalised x position at t=0
+
+
 @dataclass
 class SyntheticSourceConfig:
     width: int = 640
     height: int = 480
     fps: float = 30.0
     num_targets: int = 3
-    # Normalised (0-1) y position of each lane. Targets are assigned to
-    # lanes round-robin. None -> evenly spaced across the frame.
+    # Explicit target list. None -> auto-generate num_targets targets
+    # cycling through the confirmed colours and known sizes, using the
+    # speed/range_m/lane_fractions below.
+    targets: tuple[SyntheticTarget, ...] | None = None
     lane_fractions: tuple[float, ...] | None = None
     speed: float = 0.15  # normalised x-units per second
-    radius_px: int = 18
+    range_m: float = 10.0
     noise_std: float = 0.0  # gaussian pixel noise std, 0 disables it
     emit_depth: bool = False
-    depth_m: float = 10.0  # simulated distance painted onto each target
     seed: int = 0
+
+    def resolve_targets(self) -> tuple[SyntheticTarget, ...]:
+        if self.targets is not None:
+            return self.targets
+        n = max(self.num_targets, 0)
+        if n == 0:
+            return ()
+        lanes = self.lane_fractions or _default_lanes(n)
+        resolved = []
+        for i in range(n):
+            resolved.append(
+                SyntheticTarget(
+                    color_hex=_DEFAULT_COLORS_HEX[i % len(_DEFAULT_COLORS_HEX)],
+                    size_m=_DEFAULT_SIZES_M[i % len(_DEFAULT_SIZES_M)],
+                    lane_fraction=lanes[i % len(lanes)],
+                    speed=self.speed,
+                    range_m=self.range_m,
+                    start_x=((i + 0.5) / n) % 1.0,
+                )
+            )
+        return tuple(resolved)
 
 
 class SyntheticSource:
-    """Procedurally draws red circles (balloons) moving along horizontal lanes.
+    """Procedurally draws coloured targets moving along horizontal lanes.
 
     No files, no hardware, fully deterministic for a given seed and read()
     call count. This is the workhorse for tests and GUI development against
-    a resolution and frame rate nothing else can guarantee.
+    a resolution and frame rate nothing else can guarantee. Apparent pixel
+    size is derived from each target's true size_m and simulated range_m
+    through the same pinhole model l2_color.py uses to estimate range, so
+    size-based range estimation can be exercised end to end against it.
     """
 
     def __init__(self, clock: Clock, config: SyntheticSourceConfig | None = None) -> None:
         self._clock = clock
         self._config = config or SyntheticSourceConfig()
         self._intrinsics = estimated_intrinsics(self._config.width, self._config.height)
+        self._targets = self._config.resolve_targets()
         self._frame_index = 0
         self._rng: np.random.Generator = np.random.default_rng(self._config.seed)
-        self._lane_fractions = self._config.lane_fractions or self._default_lanes()
         self._started = False
-
-    def _default_lanes(self) -> tuple[float, ...]:
-        n = max(1, min(3, self._config.num_targets))
-        return tuple((i + 1) / (n + 1) for i in range(n))
 
     def start(self) -> None:
         self._frame_index = 0
@@ -100,19 +151,9 @@ class SyntheticSource:
     def intrinsics(self) -> CameraIntrinsics:
         return self._intrinsics
 
-    def _target_positions(self, t_sim: float) -> list[tuple[float, float]]:
-        """Return (x, y) normalised centroids for every target at t_sim."""
-        cfg = self._config
-        lanes = self._lane_fractions
-        positions = []
-        for i in range(cfg.num_targets):
-            lane_y = lanes[i % len(lanes)]
-            # Offset by half a slot so a target never starts exactly at
-            # x=0, where its circle would be clipped by the frame edge.
-            start_x = ((i + 0.5) / max(cfg.num_targets, 1)) % 1.0
-            x = (start_x + cfg.speed * t_sim) % 1.0
-            positions.append((x, lane_y))
-        return positions
+    def _target_position(self, target: SyntheticTarget, t_sim: float) -> tuple[float, float]:
+        x = (target.start_x + target.speed * t_sim) % 1.0
+        return x, target.lane_fraction
 
     def read(self) -> Frame | None:
         if not self._started:
@@ -126,12 +167,16 @@ class SyntheticSource:
         if cfg.emit_depth:
             depth = np.zeros((cfg.height, cfg.width), dtype=np.float32)
 
-        for x_norm, y_norm in self._target_positions(t_sim):
+        for target in self._targets:
+            x_norm, y_norm = self._target_position(target, t_sim)
             cx = int(x_norm * cfg.width)
             cy = int(y_norm * cfg.height)
-            cv2.circle(image, (cx, cy), cfg.radius_px, _RED_BGR, thickness=-1)
+            diameter_px = self._intrinsics.fx * target.size_m / target.range_m
+            radius_px = max(1, int(round(diameter_px / 2.0)))
+            color_bgr = hex_to_bgr(target.color_hex)
+            cv2.circle(image, (cx, cy), radius_px, color_bgr, thickness=-1)
             if depth is not None:
-                cv2.circle(depth, (cx, cy), cfg.radius_px, float(cfg.depth_m), thickness=-1)
+                cv2.circle(depth, (cx, cy), radius_px, float(target.range_m), thickness=-1)
 
         if cfg.noise_std > 0:
             noise = self._rng.normal(0.0, cfg.noise_std, size=image.shape)

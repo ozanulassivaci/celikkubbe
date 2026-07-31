@@ -7,10 +7,15 @@ import pytest
 
 from celikkubbe.core.clock import FakeClock
 from celikkubbe.vision.sources import (
+    FRIENDLY_HEX,
+    HOSTILE_HEX,
     SyntheticSource,
     SyntheticSourceConfig,
+    SyntheticTarget,
     VideoFileSource,
     WebcamSource,
+    estimated_intrinsics,
+    hex_to_bgr,
 )
 
 
@@ -78,9 +83,7 @@ def test_synthetic_source_has_depth_flag() -> None:
 
 
 def test_synthetic_source_depth_is_valid_only_near_target() -> None:
-    source = _started_source(
-        width=320, height=240, num_targets=1, emit_depth=True, depth_m=7.5, radius_px=10
-    )
+    source = _started_source(width=320, height=240, num_targets=1, emit_depth=True, range_m=7.5)
     frame = source.read()
     assert frame.depth is not None
     # Background depth is 0.0 (invalid); only the target's footprint is valid.
@@ -88,6 +91,69 @@ def test_synthetic_source_depth_is_valid_only_near_target() -> None:
     assert np.isclose(frame.depth.max(), 7.5)
     valid_fraction = np.count_nonzero(frame.depth) / frame.depth.size
     assert 0 < valid_fraction < 0.2
+
+
+def test_synthetic_source_auto_generates_alternating_colours() -> None:
+    resolved = SyntheticSourceConfig(num_targets=4, speed=0.0).resolve_targets()
+    colors = [t.color_hex for t in resolved]
+    assert colors == [HOSTILE_HEX, FRIENDLY_HEX, HOSTILE_HEX, FRIENDLY_HEX]
+
+
+def test_synthetic_source_renders_both_colours() -> None:
+    source = _started_source(width=320, height=240, num_targets=2, speed=0.0)
+    frame = source.read()
+    hostile_bgr = np.array(hex_to_bgr(HOSTILE_HEX))
+    friendly_bgr = np.array(hex_to_bgr(FRIENDLY_HEX))
+    pixels = frame.image.reshape(-1, 3)
+    assert np.any(np.all(pixels == hostile_bgr, axis=1))
+    assert np.any(np.all(pixels == friendly_bgr, axis=1))
+
+
+def test_synthetic_source_apparent_size_follows_pinhole_model() -> None:
+    # A target twice as far away should render at roughly half the pixel
+    # diameter — the same fx * size_m / range_m relationship l2_color.py
+    # uses for size-based range estimation.
+    near = SyntheticTarget(color_hex=HOSTILE_HEX, size_m=0.5, lane_fraction=0.5, range_m=5.0)
+    far = SyntheticTarget(color_hex=HOSTILE_HEX, size_m=0.5, lane_fraction=0.5, range_m=10.0)
+
+    def rendered_width(target: SyntheticTarget) -> int:
+        cfg = SyntheticSourceConfig(width=640, height=480, targets=(target,))
+        source = SyntheticSource(FakeClock(), cfg)
+        source.start()
+        frame = source.read()
+        mask = np.any(frame.image != (40, 40, 40), axis=-1)
+        cols = np.where(mask.any(axis=0))[0]
+        return int(cols.max() - cols.min())
+
+    assert rendered_width(near) > rendered_width(far)
+    assert abs(rendered_width(near) - 2 * rendered_width(far)) <= 2
+
+
+def test_synthetic_source_explicit_targets_override_num_targets() -> None:
+    targets = (
+        SyntheticTarget(color_hex=FRIENDLY_HEX, size_m=0.5, lane_fraction=0.3, range_m=8.0),
+    )
+    cfg = SyntheticSourceConfig(num_targets=5, targets=targets)
+    assert cfg.resolve_targets() == targets
+
+
+def test_hex_to_bgr_matches_confirmed_hostile_and_friendly_values() -> None:
+    assert hex_to_bgr(HOSTILE_HEX) == (10, 10, 245)
+    assert hex_to_bgr(FRIENDLY_HEX) == (224, 163, 0)
+
+
+def test_estimated_intrinsics_matches_worked_reference_pixel_sizes() -> None:
+    # Reference numbers from the competition spec: a 50cm model at 15m and
+    # a 30cm drone at 15m, at both candidate resolutions.
+    for width, height, expected_50cm, expected_30cm in (
+        (1280, 720, 31, 19),
+        (1920, 1080, 47, 28),
+    ):
+        intrinsics = estimated_intrinsics(width, height)
+        px_50cm = intrinsics.fx * 0.50 / 15.0
+        px_30cm = intrinsics.fx * 0.30 / 15.0
+        assert round(px_50cm) == expected_50cm
+        assert round(px_30cm) == expected_30cm
 
 
 class _FakeCv2Capture:
