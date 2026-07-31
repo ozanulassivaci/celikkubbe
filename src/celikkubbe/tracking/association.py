@@ -59,8 +59,17 @@ def associate(
     predicted_bboxes: list[BoundingBox],
     detection_bboxes: list[BoundingBox],
     max_displacement: float = MAX_ASSOCIATION_DISPLACEMENT,
+    track_groups: list[object] | None = None,
+    detection_groups: list[object] | None = None,
 ) -> tuple[list[tuple[int, int]], list[int], list[int]]:
     """Match predicted track boxes against this frame's detection boxes.
+
+    ``track_groups``/``detection_groups`` add a second, hard eligibility
+    gate alongside distance: when both are given, a pair is only eligible
+    if ``track_groups[i] == detection_groups[j]``. This is deliberately
+    generic (any comparable label, not just IFF) — the caller decides
+    what "must not cross-absorb" means; a red track must never absorb a
+    blue detection is simply the first use of it.
 
     Returns ``(matches, unmatched_track_indices, unmatched_detection_indices)``
     where ``matches`` is a list of ``(track_index, detection_index)`` pairs.
@@ -75,6 +84,12 @@ def associate(
     for i, track_bbox in enumerate(predicted_bboxes):
         for j, det_bbox in enumerate(detection_bboxes):
             if _centroid_distance(track_bbox, det_bbox) > max_displacement:
+                continue
+            if (
+                track_groups is not None
+                and detection_groups is not None
+                and track_groups[i] != detection_groups[j]
+            ):
                 continue
             eligible[i, j] = True
             cost[i, j] = 1.0 - iou(track_bbox, det_bbox)

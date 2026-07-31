@@ -51,3 +51,31 @@ def test_associate_prefers_globally_optimal_assignment() -> None:
     ]
     matches, _, _ = associate(predicted, detections)
     assert set(matches) == {(0, 1), (1, 0)}
+
+
+def test_associate_gates_out_mismatched_group_despite_perfect_overlap() -> None:
+    # Same bbox, perfect IoU — but a red track must not absorb a blue
+    # detection regardless of how well their boxes overlap.
+    predicted = [(0.1, 0.1, 0.2, 0.2)]
+    detections = [(0.1, 0.1, 0.2, 0.2)]
+    matches, unmatched_tracks, unmatched_dets = associate(
+        predicted, detections, track_groups=["red"], detection_groups=["blue"]
+    )
+    assert matches == []
+    assert unmatched_tracks == [0]
+    assert unmatched_dets == [0]
+
+
+def test_associate_allows_matching_group_with_perfect_overlap() -> None:
+    predicted = [(0.1, 0.1, 0.2, 0.2)]
+    detections = [(0.1, 0.1, 0.2, 0.2)]
+    matches, _, _ = associate(predicted, detections, track_groups=["red"], detection_groups=["red"])
+    assert matches == [(0, 0)]
+
+
+def test_associate_without_groups_ignores_colour_entirely() -> None:
+    # Backwards compatible: omitting both group lists means no colour gate.
+    predicted = [(0.1, 0.1, 0.2, 0.2)]
+    detections = [(0.1, 0.1, 0.2, 0.2)]
+    matches, _, _ = associate(predicted, detections)
+    assert matches == [(0, 0)]

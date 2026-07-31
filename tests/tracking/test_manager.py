@@ -119,24 +119,41 @@ def test_class_voting_resists_a_single_misclassified_frame() -> None:
 
 
 def test_friendly_frame_within_window_keeps_track_friendly() -> None:
+    # Colour-gated association (below) means a track can no longer be fed
+    # a conflicting-colour *detection* through update() and stay the same
+    # track — a HOSTILE-coloured measurement is, correctly, a different
+    # track now. So the voting/aging behaviour itself is exercised at the
+    # state level directly, decoupled from association.
     manager = TrackManager(FakeClock(), confirm_frames=1)
-    now = 0.0
-    manager.update([make_detection(0.5, 0.5, iff=IFF.FRIENDLY)], now=now)
+    tracks = manager.update([make_detection(0.5, 0.5, iff=IFF.FRIENDLY)], now=0.0)
+    state = manager._tracks[tracks[0].track_id]
     for _ in range(4):
-        now += 1.0
-        tracks = manager.update([make_detection(0.5, 0.5, iff=IFF.HOSTILE)], now=now)
-        assert tracks[0].iff is IFF.FRIENDLY
+        state.iff_votes.append(IFF.HOSTILE)
+        assert state._voted_iff() is IFF.FRIENDLY
 
 
 def test_friendly_frame_ages_out_of_the_window_eventually() -> None:
     manager = TrackManager(FakeClock(), confirm_frames=1)
-    now = 0.0
-    manager.update([make_detection(0.5, 0.5, iff=IFF.FRIENDLY)], now=now)
-    tracks = []
+    tracks = manager.update([make_detection(0.5, 0.5, iff=IFF.FRIENDLY)], now=0.0)
+    state = manager._tracks[tracks[0].track_id]
     for _ in range(10):
-        now += 1.0
-        tracks = manager.update([make_detection(0.5, 0.5, iff=IFF.HOSTILE)], now=now)
-    assert tracks[0].iff is IFF.HOSTILE
+        state.iff_votes.append(IFF.HOSTILE)
+    assert state._voted_iff() is IFF.HOSTILE
+
+
+def test_red_track_never_absorbs_a_blue_detection() -> None:
+    manager = TrackManager(FakeClock(), confirm_frames=1)
+    tracks = manager.update([make_detection(0.5, 0.5, iff=IFF.HOSTILE)], now=0.0)
+    hostile_id = tracks[0].track_id
+
+    # A friendly-coloured detection at the exact same position must not
+    # match the existing hostile track; it must start a new one.
+    tracks = manager.update([make_detection(0.5, 0.5, iff=IFF.FRIENDLY)], now=1.0)
+    assert len(tracks) == 2
+    ids = {t.track_id for t in tracks}
+    assert hostile_id in ids
+    new_track = next(t for t in tracks if t.track_id != hostile_id)
+    assert new_track.iff is IFF.FRIENDLY
 
 
 def test_emitted_tracks_are_frozen() -> None:

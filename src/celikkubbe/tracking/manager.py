@@ -141,9 +141,22 @@ class TrackManager:
         track_ids = list(self._tracks.keys())
         predicted_bboxes = [self._tracks[tid].predicted_bbox() for tid in track_ids]
         detection_bboxes = [d.bbox for d in detections]
+        # Gate on the fail-safe *voted* IFF, not the single most recent
+        # detection's colour: a track that has ever shown a FRIENDLY frame
+        # stays gated as FRIENDLY for association too, consistent with the
+        # same fail-safe reasoning behind Track.iff itself. The
+        # alternative — gating on the latest raw colour — would let one
+        # HOSTILE-coloured measurement immediately re-open a track that
+        # fail-safe voting has already decided to protect.
+        track_groups = [self._tracks[tid]._voted_iff() for tid in track_ids]
+        detection_groups = [d.iff for d in detections]
 
         matches, unmatched_track_idx, unmatched_det_idx = associate(
-            predicted_bboxes, detection_bboxes, **self._association_kwargs
+            predicted_bboxes,
+            detection_bboxes,
+            track_groups=track_groups,
+            detection_groups=detection_groups,
+            **self._association_kwargs,
         )
 
         for track_idx, det_idx in matches:
