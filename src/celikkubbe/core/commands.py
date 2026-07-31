@@ -43,12 +43,6 @@ class Home:
 
 
 @dataclass(frozen=True)
-class MotorEnable:
-    axis: Axis
-    on: bool
-
-
-@dataclass(frozen=True)
 class Arm:
     pass
 
@@ -75,15 +69,5 @@ class SetParam:
 
 
 Command = (
-    SetMode
-    | Goto
-    | Jog
-    | SetVelocity
-    | Home
-    | MotorEnable
-    | Arm
-    | Disarm
-    | Fire
-    | SoftEstop
-    | SetParam
+    SetMode | Goto | Jog | SetVelocity | Home | Arm | Disarm | Fire | SoftEstop | SetParam
 )
