@@ -24,16 +24,16 @@ def test_pipeline_runs_synthetic_source_for_a_few_frames() -> None:
     assert "tracks=" in lines[-1]
 
 
-def test_pipeline_reaches_s4_aim_and_reports_class_unknown_reason() -> None:
-    # With only the L2 colour detector (cls is always None), autonomous
-    # engagement should reliably stall in S4_AIM with CLASS_UNKNOWN once a
-    # target is confirmed and selected — this is IFFGate working as
-    # designed, not a demo bug.
+def test_pipeline_completes_full_s1_to_s6_cycle_for_a_single_hostile_target() -> None:
+    # L2 sets IFF from colour, so a single hostile-coloured target passes
+    # every gate given the demo's closer default range: the chain should
+    # actually fire and cycle back to S1, not just reach S4_AIM.
     buf = io.StringIO()
     with redirect_stdout(buf):
         run(["--source", "synthetic", "--targets", "1", "--frames", "20"])
     lines = [line for line in buf.getvalue().splitlines() if line.strip()]
-    assert any("eng=S4_AIM" in line and "reason=CLASS_UNKNOWN" in line for line in lines)
+    assert any("eng=S6_ASSESS" in line and "cmds=Fire" in line for line in lines)
+    assert any("eng=S1_SEARCH" in line for line in lines[9:])  # cycles back after S6
 
 
 def test_pipeline_requires_path_for_video_source() -> None:
@@ -81,6 +81,12 @@ def test_simulated_turret_link_arms_and_slews_towards_goto() -> None:
     assert telemetry.armed is True
     assert 0.0 < telemetry.pan_deg <= 10.0
     assert telemetry.target_pan_deg == 10.0
+    assert telemetry.motion_complete is False  # 90 deg/s * 0.05s = 4.5 deg, short of 10
+
+    clock.advance(1.0)  # plenty of time to finish a 10 degree move
+    telemetry = link.poll()
+    assert telemetry.pan_deg == 10.0
+    assert telemetry.motion_complete is True
 
 
 def test_simulated_turret_link_estop_marks_position_invalid() -> None:

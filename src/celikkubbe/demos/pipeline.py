@@ -32,6 +32,7 @@ from celikkubbe.core.commands import Arm, Command, Disarm, Fire, Goto, SoftEstop
 from celikkubbe.core.engagement import step as engagement_step
 from celikkubbe.core.protocols import Clock
 from celikkubbe.core.types import (
+    IFF,
     CameraIntrinsics,
     EngagementState,
     HitResult,
@@ -105,9 +106,13 @@ class SimulatedTurretLink:
         max_delta = self._max_vel_dps * dt
         self._pan_deg = _step_towards(self._pan_deg, self._target_pan_deg, max_delta)
         self._tilt_deg = _step_towards(self._tilt_deg, self._target_tilt_deg, max_delta)
-        following_error = max(
-            abs(self._pan_deg - self._target_pan_deg),
-            abs(self._tilt_deg - self._target_tilt_deg),
+        # No measured position exists to check a following error against
+        # (see Telemetry.pan_deg/tilt_deg) — _step_towards snaps exactly to
+        # the target once within reach, so "arrived" is an exact equality
+        # check here, standing in for the MCU's own trajectory generator
+        # report.
+        motion_complete = self._pan_deg == self._target_pan_deg and (
+            self._tilt_deg == self._target_tilt_deg
         )
         return Telemetry(
             t=now,
@@ -117,7 +122,7 @@ class SimulatedTurretLink:
             tilt_vel_dps=0.0,
             target_pan_deg=self._target_pan_deg,
             target_tilt_deg=self._target_tilt_deg,
-            following_error_deg=following_error,
+            motion_complete=motion_complete,
             armed=self._armed,
             estop=self._estop,
             position_valid=not self._estop,
@@ -160,16 +165,28 @@ def _build_source(args: argparse.Namespace, clock: Clock):
         # bearing-only stub_aim_solutions (no lead compensation) would sit
         # in S4_AIM forever chasing an angle tolerance a non-lead solver
         # can never satisfy against a mover — an honest result, but not a
-        # useful demo default.
+        # useful demo default. L2 does now set IFF from colour, so unlike
+        # the balloon-era version of this demo, a hostile-coloured target
+        # can pass IFFGate; class stays None regardless (RangeGate is what
+        # blocks Stage 3 on that), which is the real remaining gap an
+        # L1/YOLO layer is needed to close.
         #
-        # Even stationary, expect S4_AIM to stay blocked with
-        # fallback_reason=CLASS_UNKNOWN in Stage 2/3: L2 never classifies
-        # (cls is always None), and IFFGate conservatively rejects an
-        # unclassified target regardless of stage. That is the system
-        # working as designed, not a demo bug — this pipeline cannot fire
-        # autonomously until an L1/YOLO layer supplies a class, which is
-        # exactly the gap this demo is meant to make visible.
-        config = SyntheticSourceConfig(num_targets=args.targets, speed=0.0)
+        # range_m=3.0 rather than the library default of 10.0: a 30cm
+        # drone at 10m renders at ~8px wide at 640x480, right at
+        # MIN_TARGET_PX, and the fill-ratio confidence at that scale reads
+        # ~0.54 — genuinely below CONFIDENCE_THRESHOLD, an honest
+        # resolution limit rather than a bug, but not a useful default for
+        # watching the chain reach S5/S6.
+        #
+        # With more than one target, expect priority.py to sometimes lock
+        # S3/S4 onto a FRIENDLY track: engagement.py has no mechanism to
+        # give up on a *selected* target that is permanently gate-rejected
+        # (unlike an exhausted MAX_ENGAGEMENT_ATTEMPTS, TARGET_FRIENDLY
+        # never clears) and try another one instead. That is a real gap
+        # worth fixing in engagement.py, not something this demo works
+        # around — reason=TARGET_FRIENDLY staying on screen indefinitely
+        # is exactly this demo doing its job.
+        config = SyntheticSourceConfig(num_targets=args.targets, speed=0.0, range_m=3.0)
         return SyntheticSource(clock, config)
     if args.source == "video":
         return VideoFileSource(args.path, clock)
@@ -311,11 +328,15 @@ def run(argv: list[str] | None = None) -> None:
             commands_str = ",".join(type(cmd).__name__ for cmd in commands) or "-"
             reason = engagement_result.fallback_reason
             reason_str = reason.value if reason is not None else "-"
+            n_hostile = sum(1 for t in scored if t.iff is IFF.HOSTILE)
+            n_friendly = sum(1 for t in scored if t.iff is IFF.FRIENDLY)
+            n_unknown = len(scored) - n_hostile - n_friendly
 
             print(
                 f"[{frame_count:05d}] mode={state.mode.value:<14} "
                 f"eng={state.engagement.value:<10} layer=L2 "
-                f"tracks={len(scored)} sel={state.selected_track_id} "
+                f"tracks={len(scored)}(H:{n_hostile},F:{n_friendly},U:{n_unknown}) "
+                f"sel={state.selected_track_id} "
                 f"cmds={commands_str} reason={reason_str} fps={fps:6.1f} "
                 f"detect={detect_ms:5.2f}ms track={track_ms:5.2f}ms tick={tick_ms:5.2f}ms"
             )
