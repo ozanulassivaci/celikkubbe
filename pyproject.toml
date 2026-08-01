@@ -12,6 +12,7 @@ dependencies = [
     "opencv-python>=5.0,<6.0",
     "filterpy>=1.4.5,<1.5",
     "scipy>=1.15,<2.0",
+    "pyserial>=3.5,<4.0",
 ]
 
 [project.optional-dependencies]
@@ -33,11 +34,11 @@ select = ["E", "F", "I", "UP", "B"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "--cov=celikkubbe.core --cov=celikkubbe.vision --cov=celikkubbe.tracking --cov=celikkubbe.demos --cov-report=term-missing"
+addopts = "--cov=celikkubbe.core --cov=celikkubbe.vision --cov=celikkubbe.tracking --cov=celikkubbe.io --cov=celikkubbe.demos --cov-report=term-missing"
 
 [tool.coverage.run]
 branch = true
-source = ["celikkubbe.core", "celikkubbe.vision", "celikkubbe.tracking", "celikkubbe.demos"]
+source = ["celikkubbe.core", "celikkubbe.vision", "celikkubbe.tracking", "celikkubbe.io", "celikkubbe.demos"]
 
 [tool.coverage.report]
 fail_under = 90

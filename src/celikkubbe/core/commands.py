@@ -68,4 +68,21 @@ class SetParam:
     value: float
 
 
-Command = SetMode | Goto | Jog | SetVelocity | Home | Arm | Disarm | Fire | SoftEstop | SetParam
+@dataclass(frozen=True)
+class Zero:
+    """Declare the current position of one axis to be ``value_deg``.
+
+    The only homing mechanism the electronics actually have (see
+    docs/protocol.md section 5): no limit switches exist, so the operator
+    centres the turret by eye and the GUI sends this per axis. ``Home``
+    (below) corresponds to the protocol's ``home`` command, reserved until
+    limit switches exist.
+    """
+
+    axis: Axis
+    value_deg: float
+
+
+Command = (
+    SetMode | Goto | Jog | SetVelocity | Home | Zero | Arm | Disarm | Fire | SoftEstop | SetParam
+)
