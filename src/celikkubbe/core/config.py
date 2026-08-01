@@ -67,6 +67,25 @@ RANGE_RULES: dict[TargetClass, tuple[float, float]] = {
     TargetClass.BALLOON: (0.0, 15.0),
 }
 
+
+def derive_unknown_class_range(
+    range_rules: dict[TargetClass, tuple[float, float]],
+) -> tuple[float, float]:
+    """Narrowest band satisfying every class rule simultaneously.
+
+    Without class information (an L2 fallback in Stage 3), this is the
+    only range envelope guaranteed valid whatever the target actually is.
+    A function, not an inline expression, so a test can verify the
+    derivation against a rule table other than the real one.
+    """
+    return (
+        max(lo for lo, _ in range_rules.values()),
+        min(hi for _, hi in range_rules.values()),
+    )
+
+
+UNKNOWN_CLASS_RANGE = derive_unknown_class_range(RANGE_RULES)
+
 # --- prioritisation ---
 CLASS_PRIORITY: dict[TargetClass, int] = {
     TargetClass.F16: 100,

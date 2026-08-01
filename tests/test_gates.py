@@ -106,7 +106,9 @@ def test_range_gate_allows_class_without_rule_in_stage1_and_2() -> None:
 
 
 def test_l2_detection_passes_iff_gate_but_fails_range_gate_in_stage3() -> None:
-    # cls=None (L2 never classifies), iff=HOSTILE (L2 sets this from colour).
+    # cls=None (L2 never classifies), iff defaults to UNKNOWN here (no
+    # colour confirmation passed in) — RangeGate has no basis at all to
+    # apply the UNKNOWN_CLASS_RANGE leniency and stays fully closed.
     passed, reason = IFFGate.evaluate(IFF.HOSTILE)
     assert passed is True
     assert reason is None
@@ -119,6 +121,43 @@ def test_l2_detection_passes_iff_gate_but_fails_range_gate_in_stage3() -> None:
     passed, reason = RangeGate.evaluate(None, 8.0, Stage.STAGE_2)
     assert passed is True
     assert reason is None
+
+
+def test_stage3_l2_hostile_track_in_intersection_band_passes_range_gate() -> None:
+    passed, reason = RangeGate.evaluate(None, 12.0, Stage.STAGE_3, IFF.HOSTILE)
+    assert passed is True
+    assert reason is None
+
+
+def test_stage3_l2_hostile_track_outside_intersection_band_is_rejected() -> None:
+    passed, reason = RangeGate.evaluate(None, 8.0, Stage.STAGE_3, IFF.HOSTILE)
+    assert passed is False
+    assert reason is ReasonCode.RANGE_OUT_OF_BOUNDS
+
+
+def test_stage3_l2_hostile_track_with_no_range_is_still_rejected() -> None:
+    # No range at all is a different problem from no class: it must still
+    # reject, even when colour-confirmed hostile.
+    passed, reason = RangeGate.evaluate(None, None, Stage.STAGE_3, IFF.HOSTILE)
+    assert passed is False
+    assert reason is ReasonCode.RANGE_UNKNOWN
+
+
+def test_unknown_class_range_leniency_is_stage3_only() -> None:
+    # Stage 1/2 already allow an unknown class through unconditionally;
+    # the intersection band must not make them *stricter*.
+    for stage in (Stage.STAGE_1, Stage.STAGE_2):
+        passed, reason = RangeGate.evaluate(None, 8.0, stage, IFF.HOSTILE)
+        assert passed is True
+        assert reason is None
+
+
+def test_unknown_class_range_leniency_requires_hostile_iff() -> None:
+    # A merely-unknown IFF must not get the same benefit of the doubt as
+    # a colour-confirmed hostile: it fails closed like before.
+    passed, reason = RangeGate.evaluate(None, 12.0, Stage.STAGE_3, IFF.UNKNOWN)
+    assert passed is False
+    assert reason is ReasonCode.RANGE_UNKNOWN
 
 
 def test_confidence_gate_boundary() -> None:

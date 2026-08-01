@@ -48,7 +48,7 @@ class IFFGate:
 class RangeGate:
     @staticmethod
     def evaluate(
-        cls: TargetClass | None, range_m: float | None, stage: Stage
+        cls: TargetClass | None, range_m: float | None, stage: Stage, iff: IFF = IFF.UNKNOWN
     ) -> tuple[bool, ReasonCode | None]:
         # Fails closed: a class with no entry in RANGE_RULES (including
         # UNKNOWN and None) is rejected, same as an unknown range_m. "No
@@ -56,6 +56,16 @@ class RangeGate:
         # so development against a depth-less webcam or an unlisted class
         # (e.g. balloons before classification) still works.
         bounds = config.RANGE_RULES.get(cls)
+        if bounds is None and cls is None and iff is IFF.HOSTILE and stage is Stage.STAGE_3:
+            # L2 fallback in Stage 3: no class, but colour-confirmed
+            # hostile. Rejecting outright here would make Stage 3 engage
+            # nothing at all the moment the cascade falls back to L2 —
+            # mute, not conservative. Apply the intersection of every
+            # class's range rule instead: the only envelope guaranteed
+            # valid whatever the target actually is. Stages 1/2 do not
+            # need this — they already let an unknown class through
+            # unconditionally.
+            bounds = config.UNKNOWN_CLASS_RANGE
         if range_m is None or bounds is None:
             if stage is Stage.STAGE_3:
                 return False, ReasonCode.RANGE_UNKNOWN
@@ -160,7 +170,7 @@ def evaluate_all(ctx: GateContext) -> list[ReasonCode]:
     results = (
         SafetyGate.evaluate(ctx.mode, ctx.armed, ctx.estop, ctx.position_valid),
         IFFGate.evaluate(ctx.iff),
-        RangeGate.evaluate(ctx.cls, ctx.range_m, ctx.stage),
+        RangeGate.evaluate(ctx.cls, ctx.range_m, ctx.stage, ctx.iff),
         ConfidenceGate.evaluate(ctx.confidence),
         AngleGate.evaluate(
             ctx.target_pan_deg,
