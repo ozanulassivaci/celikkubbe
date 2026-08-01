@@ -313,3 +313,26 @@ def test_set_velocity_has_no_wire_equivalent_in_sim_either() -> None:
     link = SimTurretLink(clock)
     link.send(SetVelocity(1.0, 2.0))
     assert link.last_ack is AckResult.UNKNOWN_COMMAND
+
+
+def test_send_tracked_returns_seq_and_records_ack() -> None:
+    clock = FakeClock()
+    link = SimTurretLink(clock)
+    seq = link.send_tracked(Arm())
+    assert seq == 0
+    assert link.drain_acks() == [(0, AckResult.OK)]
+    assert link.drain_acks() == []  # drained -- calling again is empty
+
+
+def test_retransmit_with_same_seq_does_not_refire() -> None:
+    clock = FakeClock()
+    link = SimTurretLink(clock)
+    link.send(Arm())
+    seq = link.send_tracked(Fire(count=1))
+    assert link.ammo_fired == 1
+
+    # Simulate a retransmit: the original ACK was "lost", so link_worker
+    # resends under the *same* seq. Protocol section 3.1 says the MCU
+    # discards a duplicate seq -- it must not fire again.
+    link.send_tracked(Fire(count=1), seq=seq)
+    assert link.ammo_fired == 1

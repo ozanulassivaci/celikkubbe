@@ -220,6 +220,8 @@ class SimTurretLink:
     ``watchdog_tripped``                   -- sim's own 200ms watchdog
     ``crc_error_count``                    -- injected-fault counter
     ``pending_events`` / ``drain_events()``-- EVENT-equivalent notifications
+    ``pending_acks`` / ``drain_acks()``    -- (seq, AckResult) pairs, for
+                                               link_worker's ACK tracking
     """
 
     def __init__(self, clock: Clock) -> None:
@@ -241,9 +243,12 @@ class SimTurretLink:
         self.last_ack = AckResult.OK
         self.crc_error_count = 0
         self.pending_events: list[tuple[EventId, Axis | None, float]] = []
+        self.pending_acks: list[tuple[int, AckResult]] = []
+        self._outbound_seq = 0
+        self._last_applied_seq: int | None = None
 
         self._latency_s = 0.0
-        self._pending_commands: deque[tuple[float, Command]] = deque()
+        self._pending_commands: deque[tuple[float, int, Command]] = deque()
         self._dropout_until: float | None = None
         self._crc_error_rate = 0.0
 
@@ -254,12 +259,42 @@ class SimTurretLink:
         return True
 
     def send(self, cmd: Command) -> None:
+        self.send_tracked(cmd)
+
+    def send_tracked(self, cmd: Command, seq: int | None = None) -> int:
+        """Like ``send``, but returns the seq used and records an ack for
+        it in ``pending_acks`` -- link_worker needs the seq to correlate a
+        later ACK/retransmit; ``TurretLink.send()`` alone has no way to
+        report it. Passing ``seq`` explicitly (a retransmit) reuses it
+        instead of allocating a fresh one, so protocol section 3.1's
+        duplicate-seq dedup below actually has something to compare against.
+        """
+        use_seq = self._outbound_seq if seq is None else seq
         now = self._clock.now()
         self._last_contact_t = now
         if self._latency_s <= 0.0:
-            self._apply_command(now, cmd)
+            self._dispatch(now, use_seq, cmd)
         else:
-            self._pending_commands.append((now + self._latency_s, cmd))
+            self._pending_commands.append((now + self._latency_s, use_seq, cmd))
+        if seq is None:
+            self._outbound_seq = (self._outbound_seq + 1) & 0xFFFF
+        return use_seq
+
+    def _dispatch(self, now: float, seq: int, cmd: Command) -> None:
+        if seq == self._last_applied_seq:
+            # Duplicate retransmission: docs/protocol.md section 3.1 says
+            # the MCU discards it -- ack it again without re-executing, so
+            # a retransmitted Fire whose original ACK was merely lost in
+            # transit does not fire a second time.
+            self.pending_acks.append((seq, self.last_ack))
+            return
+        self._apply_command(now, cmd)
+        self._last_applied_seq = seq
+        self.pending_acks.append((seq, self.last_ack))
+
+    def drain_acks(self) -> list[tuple[int, AckResult]]:
+        acks, self.pending_acks = self.pending_acks, []
+        return acks
 
     def send_heartbeat(self) -> None:
         """Not a Command -- resets the watchdog with no positional effect."""
@@ -311,8 +346,8 @@ class SimTurretLink:
 
     def _drain_pending_commands(self, now: float) -> None:
         while self._pending_commands and self._pending_commands[0][0] <= now:
-            _, cmd = self._pending_commands.popleft()
-            self._apply_command(now, cmd)
+            _, seq, cmd = self._pending_commands.popleft()
+            self._dispatch(now, seq, cmd)
 
     def _apply_command(self, now: float, cmd: Command) -> None:
         if isinstance(cmd, Fire):

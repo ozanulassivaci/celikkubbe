@@ -24,7 +24,14 @@ import serial.tools.list_ports as list_ports
 from celikkubbe.core.commands import Command
 from celikkubbe.core.protocols import Clock
 from celikkubbe.core.types import Telemetry
-from celikkubbe.io.codec import FrameParser, TelemetryFrame, encode_command, encode_heartbeat
+from celikkubbe.io.codec import (
+    AckFrame,
+    AckResult,
+    FrameParser,
+    TelemetryFrame,
+    encode_command,
+    encode_heartbeat,
+)
 
 BAUD_RATE = 921600
 READ_TIMEOUT_S = 0.02
@@ -48,9 +55,10 @@ class SerialTurretLink:
 
     Extra attributes beyond the Protocol, mirroring ``SimTurretLink``'s
     diagnostic surface so ``link_worker`` can read either uniformly:
-    ``crc_error_count``, ``resync_count``, ``dropped_byte_count`` (from the
-    underlying ``FrameParser``), and ``last_telemetry_frame`` (the full
-    wire payload, for whatever a future GUI debug panel wants beyond
+    ``send_tracked()``/``drain_acks()`` (ACK correlation for retransmit
+    tracking), ``crc_error_count``, ``resync_count``, ``dropped_byte_count``
+    (from the underlying ``FrameParser``), and ``last_telemetry_frame`` (the
+    full wire payload, for whatever a future GUI debug panel wants beyond
     ``core.types.Telemetry``).
     """
 
@@ -71,6 +79,7 @@ class SerialTurretLink:
         self._serial: serial.Serial | None = None
         self._parser = FrameParser(clock)
         self._last_telemetry_frame: TelemetryFrame | None = None
+        self._pending_acks: list[tuple[int, AckResult]] = []
         self._seq = 0
         self._backoff_index = 0
         self._next_reconnect_attempt_t = clock.now()
@@ -84,9 +93,7 @@ class SerialTurretLink:
         return self._serial is not None and self._serial.is_open
 
     def send(self, cmd: Command) -> None:
-        if self._ensure_connected():
-            self._write(encode_command(cmd, self._seq))
-            self._seq = (self._seq + 1) & 0xFFFF
+        self.send_tracked(cmd)
 
     def poll(self) -> Telemetry | None:
         if not self._ensure_connected():
@@ -102,9 +109,30 @@ class SerialTurretLink:
             if isinstance(frame, TelemetryFrame):
                 self._last_telemetry_frame = frame
                 latest = frame.telemetry
+            elif isinstance(frame, AckFrame):
+                self._pending_acks.append((frame.ack_seq, frame.result))
         return latest
 
     # --- link-layer extras used by link_worker, beyond the Protocol ---
+
+    def send_tracked(self, cmd: Command, seq: int | None = None) -> int:
+        """Like ``send``, but returns the seq used, so link_worker can
+        correlate it against a later ACK. Passing ``seq`` explicitly (a
+        retransmit) reuses it rather than allocating a fresh one -- the
+        real MCU's own duplicate-seq dedup (docs/protocol.md section 3.1)
+        is what then prevents a retransmitted Fire whose ACK was merely
+        lost in transit from firing a second time.
+        """
+        use_seq = self._seq if seq is None else seq
+        if self._ensure_connected():
+            self._write(encode_command(cmd, use_seq))
+        if seq is None:
+            self._seq = (self._seq + 1) & 0xFFFF
+        return use_seq
+
+    def drain_acks(self) -> list[tuple[int, AckResult]]:
+        acks, self._pending_acks = self._pending_acks, []
+        return acks
 
     def send_heartbeat(self) -> None:
         """``hb`` has no ``Command`` representation -- see codec.py."""

@@ -106,6 +106,30 @@ def test_send_heartbeat_writes_hb_frame() -> None:
     assert fake.written[0].startswith(b'{"cmd":"hb"')
 
 
+def test_send_tracked_returns_seq_and_reuses_it_on_retransmit() -> None:
+    fake = _FakeSerial("/dev/ttyUSB0", 921600)
+    with patch("celikkubbe.io.serial_link.serial.Serial", return_value=fake):
+        link = SerialTurretLink(FakeClock(), port="/dev/ttyUSB0")
+        seq = link.send_tracked(Arm())
+        assert seq == 0
+        link.send_tracked(Arm())  # fresh command -> next seq
+        retransmit_seq = link.send_tracked(Arm(), seq=seq)
+    assert retransmit_seq == 0
+    assert b'"seq":0' in fake.written[0]
+    assert b'"seq":1' in fake.written[1]
+    assert b'"seq":0' in fake.written[2]
+
+
+def test_poll_decodes_ack_frame_into_drain_acks() -> None:
+    fake = _FakeSerial("/dev/ttyUSB0", 921600)
+    fake.feed_inbound(_ack_frame(seq=1, ack_seq=5))
+    with patch("celikkubbe.io.serial_link.serial.Serial", return_value=fake):
+        link = SerialTurretLink(FakeClock(), port="/dev/ttyUSB0")
+        link.poll()
+    assert link.drain_acks() == [(5, codec.AckResult.OK)]
+    assert link.drain_acks() == []
+
+
 def test_poll_returns_none_when_nothing_buffered() -> None:
     fake = _FakeSerial("/dev/ttyUSB0", 921600)
     with patch("celikkubbe.io.serial_link.serial.Serial", return_value=fake):
