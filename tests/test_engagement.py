@@ -5,6 +5,7 @@ import dataclasses
 from celikkubbe.core import config, engagement
 from celikkubbe.core.commands import Fire, Goto
 from celikkubbe.core.types import (
+    IFF,
     EngagementState,
     HitResult,
     Mode,
@@ -12,6 +13,8 @@ from celikkubbe.core.types import (
     ReasonCode,
     Stage,
     SystemState,
+    TargetClass,
+    Track,
     TrackStatus,
 )
 
@@ -25,6 +28,8 @@ def _apply(state: SystemState, result: engagement.StepResult) -> SystemState:
         engagement=result.engagement,
         selected_track_id=result.selected_track_id,
         attempts=result.attempts,
+        deferred=result.deferred,
+        gate_fail_since=result.gate_fail_since,
         commanded_pan_deg=result.commanded_pan_deg,
         commanded_tilt_deg=result.commanded_tilt_deg,
     )
@@ -425,3 +430,136 @@ def test_stage1_releasing_arm_mid_aim_aborts_to_s3() -> None:
     assert result.engagement is EngagementState.S3_TRACK
     assert result.commanded_pan_deg is None
     assert result.commanded_tilt_deg is None
+
+
+# --- deferring/excluding targets that cannot be engaged ---
+
+
+def test_friendly_track_is_never_selected_for_engagement() -> None:
+    state = make_state(engagement=EngagementState.S3_TRACK)
+    friendly = make_track(
+        track_id=1, status=TrackStatus.CONFIRMED, iff=IFF.FRIENDLY, risk_score=99.0
+    )
+    hostile = make_track(track_id=2, status=TrackStatus.CONFIRMED, iff=IFF.HOSTILE, risk_score=1.0)
+    result = engagement.step(state, [friendly, hostile], None, None, None, {}, now=0.0)
+    # The hostile track wins selection despite the far lower risk_score:
+    # the friendly one was never a candidate at all, not merely outscored.
+    assert result.selected_track_id == 2
+    assert result.engagement is EngagementState.S4_AIM
+
+
+def test_friendly_track_never_selected_even_as_sole_confirmed_track() -> None:
+    state = make_state(engagement=EngagementState.S3_TRACK)
+    friendly = make_track(track_id=1, status=TrackStatus.CONFIRMED, iff=IFF.FRIENDLY)
+    result = engagement.step(state, [friendly], None, None, None, {}, now=0.0)
+    assert result.selected_track_id is None
+    assert result.engagement is EngagementState.S1_SEARCH
+
+
+def _out_of_range_track(track_id: int, risk_score: float) -> Track:
+    return make_track(
+        track_id=track_id,
+        status=TrackStatus.CONFIRMED,
+        cls=TargetClass.F16,  # rule is (10.0, 15.0)
+        range_m=1.0,  # well outside it
+        risk_score=risk_score,
+    )
+
+
+def test_track_stuck_failing_gates_is_deferred_and_next_candidate_selected() -> None:
+    stuck = _out_of_range_track(1, risk_score=90.0)
+    other = make_track(track_id=2, status=TrackStatus.CONFIRMED, risk_score=10.0)
+    telemetry = make_telemetry(t=0.0, target_pan_deg=5.0, target_tilt_deg=5.0)
+    solutions = {1: (5.0, 5.0), 2: (5.0, 5.0)}
+
+    state = _armed_s4_state(selected_track_id=1)
+    result = engagement.step(state, [stuck, other], telemetry, None, None, solutions, now=0.0)
+    assert result.engagement is EngagementState.S4_AIM
+    assert result.fallback_reason is ReasonCode.RANGE_OUT_OF_BOUNDS
+    assert result.gate_fail_since == 0.0
+    assert result.deferred == {}
+
+    state = _apply(state, result)
+    now = config.GATE_REJECT_TIMEOUT_MS / 1000.0
+    result = engagement.step(state, [stuck, other], telemetry, None, None, solutions, now=now)
+    assert result.engagement is EngagementState.S3_TRACK
+    assert result.selected_track_id is None
+    assert 1 in result.deferred
+    defer_until, reason = result.deferred[1]
+    assert reason is ReasonCode.RANGE_OUT_OF_BOUNDS
+    assert defer_until == now + config.DEFER_COOLDOWN_MS / 1000.0
+
+    # Immediately after: S3 should pick the other, non-deferred candidate.
+    state = _apply(state, result)
+    result = engagement.step(state, [stuck, other], telemetry, None, None, solutions, now=now)
+    assert result.selected_track_id == 2
+    assert result.engagement is EngagementState.S4_AIM
+
+
+def test_track_not_yet_at_timeout_stays_selected_in_s4() -> None:
+    stuck = _out_of_range_track(1, risk_score=90.0)
+    telemetry = make_telemetry(t=0.0, target_pan_deg=5.0, target_tilt_deg=5.0)
+    solutions = {1: (5.0, 5.0)}
+
+    state = _armed_s4_state(selected_track_id=1)
+    result = engagement.step(state, [stuck], telemetry, None, None, solutions, now=0.0)
+    state = _apply(state, result)
+
+    just_under = config.GATE_REJECT_TIMEOUT_MS / 1000.0 - 0.01
+    result = engagement.step(state, [stuck], telemetry, None, None, solutions, now=just_under)
+    assert result.engagement is EngagementState.S4_AIM
+    assert result.selected_track_id == 1
+    assert result.deferred == {}
+
+
+def test_deferred_track_becomes_selectable_again_after_cooldown() -> None:
+    stuck = _out_of_range_track(1, risk_score=90.0)
+    defer_until = config.DEFER_COOLDOWN_MS / 1000.0
+    state = make_state(
+        engagement=EngagementState.S3_TRACK,
+        deferred={1: (defer_until, ReasonCode.RANGE_OUT_OF_BOUNDS)},
+    )
+    # Strictly before the deadline: still excluded.
+    result = engagement.step(state, [stuck], None, None, None, {}, now=defer_until - 0.01)
+    assert result.selected_track_id is None
+    assert result.engagement is EngagementState.S1_SEARCH
+
+    # At (or past) the deadline, the cooldown has fully elapsed: selectable.
+    result = engagement.step(state, [stuck], None, None, None, {}, now=defer_until)
+    assert result.selected_track_id == 1
+    assert result.deferred == {}
+
+
+def test_target_moving_into_range_engages_normally_after_deferral_expires() -> None:
+    now = config.DEFER_COOLDOWN_MS / 1000.0 + 0.01
+    state = make_state(
+        engagement=EngagementState.S3_TRACK,
+        deferred={1: (config.DEFER_COOLDOWN_MS / 1000.0, ReasonCode.RANGE_OUT_OF_BOUNDS)},
+    )
+    # The target has since moved into range.
+    now_in_range = make_track(
+        track_id=1, status=TrackStatus.CONFIRMED, cls=TargetClass.F16, range_m=12.0
+    )
+    telemetry = make_telemetry(t=now, target_pan_deg=5.0, target_tilt_deg=5.0)
+
+    result = engagement.step(state, [now_in_range], None, None, None, {}, now=now)
+    assert result.selected_track_id == 1
+    assert result.engagement is EngagementState.S4_AIM
+
+    state = _apply(state, result)
+    result = engagement.step(state, [now_in_range], telemetry, None, None, {1: (5.0, 5.0)}, now=now)
+    assert result.engagement is EngagementState.S5_ENGAGE
+    assert result.fallback_reason is None
+
+
+def test_all_candidates_deferred_or_excluded_returns_to_s1() -> None:
+    now = 5.0
+    friendly = make_track(track_id=1, status=TrackStatus.CONFIRMED, iff=IFF.FRIENDLY)
+    deferred_track = make_track(track_id=2, status=TrackStatus.CONFIRMED)
+    state = make_state(
+        engagement=EngagementState.S3_TRACK,
+        deferred={2: (now + 10.0, ReasonCode.RANGE_OUT_OF_BOUNDS)},
+    )
+    result = engagement.step(state, [friendly, deferred_track], None, None, None, {}, now=now)
+    assert result.selected_track_id is None
+    assert result.engagement is EngagementState.S1_SEARCH

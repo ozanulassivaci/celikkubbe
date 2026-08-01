@@ -22,13 +22,26 @@ re-running priority.py in the outer layer duplicates the selection logic
 and can silently diverge from step()'s own hysteresis state). Instead the
 outer layer computes a solution for every confirmed track and hands over
 the whole map; step() looks up the one it selected.
+
+Not every gate rejection means the same thing for a *selected* target.
+TARGET_FRIENDLY is permanent (IFF voting never un-commits), so
+priority.filter_engageable() keeps friendly tracks out of automatic
+selection entirely — they are never even a candidate. But
+RANGE_OUT_OF_BOUNDS, RANGE_UNKNOWN, LIMIT_EXCEEDED and NO_AIM_SOLUTION can
+all clear on their own (the target moves into range, crosses back inside
+the limits, the aim solver catches up), and leaving the machine parked on
+a single stuck target forever, ignoring every other confirmed track, is
+its own failure mode. A target that keeps failing one of those for
+GATE_REJECT_TIMEOUT_MS is deferred for DEFER_COOLDOWN_MS instead — S3
+tries the next candidate, and the deferred one becomes selectable again
+once its cooldown expires.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-from celikkubbe.core import config
+from celikkubbe.core import config, priority
 from celikkubbe.core.commands import Command, Fire, Goto
 from celikkubbe.core.gates import GateContext, evaluate_all
 from celikkubbe.core.types import (
@@ -43,6 +56,20 @@ from celikkubbe.core.types import (
     TrackStatus,
 )
 
+# Gate failures that can legitimately clear on their own and are worth
+# deferring a stuck target for, rather than parking on it forever.
+# TARGET_FRIENDLY is deliberately excluded: it is permanent, handled by
+# outright exclusion (priority.filter_engageable) before a track is ever a
+# candidate, not by a temporary deferral.
+_DEFERRABLE_REASONS = frozenset(
+    {
+        ReasonCode.RANGE_OUT_OF_BOUNDS,
+        ReasonCode.RANGE_UNKNOWN,
+        ReasonCode.LIMIT_EXCEEDED,
+        ReasonCode.NO_AIM_SOLUTION,
+    }
+)
+
 
 @dataclass(frozen=True)
 class StepResult:
@@ -50,6 +77,8 @@ class StepResult:
     commands: list[Command]
     selected_track_id: int | None
     attempts: dict[int, int]
+    deferred: dict[int, tuple[float, ReasonCode]]
+    gate_fail_since: float | None
     fallback_reason: ReasonCode | None
     commanded_pan_deg: float | None
     commanded_tilt_deg: float | None
@@ -64,12 +93,17 @@ def _find_track(tracks: list[Track], track_id: int | None) -> Track | None:
     return None
 
 
-def _pick_target(tracks: list[Track], attempts: dict[int, int]) -> Track | None:
+def _pick_target(
+    tracks: list[Track],
+    attempts: dict[int, int],
+    deferred: dict[int, tuple[float, ReasonCode]],
+) -> Track | None:
     candidates = [
         t
-        for t in tracks
+        for t in priority.filter_engageable(tracks)
         if t.status == TrackStatus.CONFIRMED
         and attempts.get(t.track_id, 0) < config.MAX_ENGAGEMENT_ATTEMPTS
+        and t.track_id not in deferred
     ]
     if not candidates:
         return None
@@ -114,6 +148,12 @@ def step(
 ) -> StepResult:
     current = state.engagement
     attempts = dict(state.attempts)
+    # Prune expired deferrals unconditionally: a track can become
+    # selectable again while some other track is selected, or while
+    # nothing is selected at all, and S3 needs an up-to-date view the
+    # next time it looks.
+    deferred = {tid: entry for tid, entry in state.deferred.items() if entry[0] > now}
+    gate_fail_since = state.gate_fail_since
     selected_track_id = state.selected_track_id
     commanded_pan_deg = state.commanded_pan_deg
     commanded_tilt_deg = state.commanded_tilt_deg
@@ -128,6 +168,8 @@ def step(
             commands=commands,
             selected_track_id=selected_track_id,
             attempts=attempts,
+            deferred=deferred,
+            gate_fail_since=gate_fail_since,
             fallback_reason=fallback_reason,
             commanded_pan_deg=commanded_pan_deg,
             commanded_tilt_deg=commanded_tilt_deg,
@@ -150,17 +192,23 @@ def step(
         if target is not None and target.status is TrackStatus.LOST:
             target = None
         if manual and operator is not None and operator.manual_target_id is not None:
+            # Operator override bypasses automatic exclusion/deferral —
+            # those are about the *automatic* candidate list, not about
+            # what a human is allowed to point at.
             picked = _find_track(tracks, operator.manual_target_id)
             if picked is not None and picked.status is not TrackStatus.LOST:
                 target = picked
         if target is None:
-            target = _pick_target(tracks, attempts)
+            target = _pick_target(tracks, attempts, deferred)
         if target is None:
             selected_track_id = None
             commanded_pan_deg = None
             commanded_tilt_deg = None
             return finish(EngagementState.S1_SEARCH)
+        new_selection = target.track_id != selected_track_id
         selected_track_id = target.track_id
+        if new_selection:
+            gate_fail_since = None
         if manual and not armed_by_operator:
             return finish(EngagementState.S3_TRACK)
         return finish(EngagementState.S4_AIM)
@@ -171,52 +219,73 @@ def step(
             selected_track_id = None
             commanded_pan_deg = None
             commanded_tilt_deg = None
+            gate_fail_since = None
             return finish(EngagementState.S1_SEARCH)
 
         if manual and not armed_by_operator:
             commanded_pan_deg = None
             commanded_tilt_deg = None
+            gate_fail_since = None
             return finish(EngagementState.S3_TRACK)
 
+        blocking_reason: ReasonCode | None = None
         solution = aim_solutions.get(target.track_id)
         if solution is None:
-            fallback_reason = ReasonCode.NO_AIM_SOLUTION
-            return finish(EngagementState.S4_AIM)
-
-        new_pan, new_tilt = solution
-        unacked = (
-            commanded_pan_deg is None
-            or commanded_tilt_deg is None
-            or abs(new_pan - commanded_pan_deg) > config.SETPOINT_ACK_EPSILON_DEG
-            or abs(new_tilt - commanded_tilt_deg) > config.SETPOINT_ACK_EPSILON_DEG
-        )
-        if unacked:
-            commands.append(
-                Goto(
-                    az_deg=new_pan,
-                    el_deg=new_tilt,
-                    max_vel_dps=config.AIM_MAX_VEL_DPS,
-                    max_accel_dps2=config.AIM_MAX_ACCEL_DPS2,
-                )
+            blocking_reason = ReasonCode.NO_AIM_SOLUTION
+        else:
+            new_pan, new_tilt = solution
+            unacked = (
+                commanded_pan_deg is None
+                or commanded_tilt_deg is None
+                or abs(new_pan - commanded_pan_deg) > config.SETPOINT_ACK_EPSILON_DEG
+                or abs(new_tilt - commanded_tilt_deg) > config.SETPOINT_ACK_EPSILON_DEG
             )
-            commanded_pan_deg = new_pan
-            commanded_tilt_deg = new_tilt
+            if unacked:
+                commands.append(
+                    Goto(
+                        az_deg=new_pan,
+                        el_deg=new_tilt,
+                        max_vel_dps=config.AIM_MAX_VEL_DPS,
+                        max_accel_dps2=config.AIM_MAX_ACCEL_DPS2,
+                    )
+                )
+                commanded_pan_deg = new_pan
+                commanded_tilt_deg = new_tilt
 
-        if telemetry is None:
-            return finish(EngagementState.S4_AIM)
+            if telemetry is None:
+                return finish(EngagementState.S4_AIM)
 
-        ctx = _build_gate_context(state, telemetry, target, commanded_pan_deg, commanded_tilt_deg)
-        reasons = evaluate_all(ctx)
-        if reasons:
-            fallback_reason = reasons[0]
-            return finish(EngagementState.S4_AIM)
+            ctx = _build_gate_context(
+                state, telemetry, target, commanded_pan_deg, commanded_tilt_deg
+            )
+            reasons = evaluate_all(ctx)
+            if reasons:
+                blocking_reason = reasons[0]
 
-        if manual:
-            if operator is not None and operator.fire_requested:
-                return finish(EngagementState.S5_ENGAGE)
-            return finish(EngagementState.S4_AIM)
+        if blocking_reason is None:
+            gate_fail_since = None
+            if manual:
+                if operator is not None and operator.fire_requested:
+                    return finish(EngagementState.S5_ENGAGE)
+                return finish(EngagementState.S4_AIM)
+            return finish(EngagementState.S5_ENGAGE)
 
-        return finish(EngagementState.S5_ENGAGE)
+        fallback_reason = blocking_reason
+        if blocking_reason in _DEFERRABLE_REASONS:
+            if gate_fail_since is None:
+                gate_fail_since = now
+            elapsed_ms = (now - gate_fail_since) * 1000.0
+            if elapsed_ms >= config.GATE_REJECT_TIMEOUT_MS:
+                defer_until = now + config.DEFER_COOLDOWN_MS / 1000.0
+                deferred[target.track_id] = (defer_until, blocking_reason)
+                selected_track_id = None
+                commanded_pan_deg = None
+                commanded_tilt_deg = None
+                gate_fail_since = None
+                return finish(EngagementState.S3_TRACK)
+        else:
+            gate_fail_since = None
+        return finish(EngagementState.S4_AIM)
 
     if current is EngagementState.S5_ENGAGE:
         target = _find_track(tracks, selected_track_id)
@@ -240,6 +309,7 @@ def step(
             return finish(EngagementState.S1_SEARCH)
         shots_so_far = attempts.get(selected_track_id, 0) if selected_track_id is not None else 0
         if target is not None and shots_so_far < config.MAX_ENGAGEMENT_ATTEMPTS:
+            gate_fail_since = None
             return finish(EngagementState.S4_AIM)
         selected_track_id = None
         commanded_pan_deg = None

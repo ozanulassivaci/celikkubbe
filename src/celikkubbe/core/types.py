@@ -269,6 +269,15 @@ class SystemState:
     tracks: tuple[Track, ...]
     selected_track_id: int | None
     attempts: dict[int, int]  # track_id -> engagement attempts so far
+    # track_id -> (defer-until timestamp, reason it was deferred). A track
+    # stuck failing a recoverable gate (range, limits, aim solution — not
+    # permanently-excluded FRIENDLY) for GATE_REJECT_TIMEOUT_MS lands here
+    # so S3 tries the next candidate instead of spinning in S4 forever.
+    deferred: dict[int, tuple[float, ReasonCode]]
+    # When the currently selected S4 track's gate failures began, if any;
+    # None while gates are passing or nothing is selected. Used to measure
+    # GATE_REJECT_TIMEOUT_MS for the deferral above.
+    gate_fail_since: float | None
     commanded_pan_deg: float | None
     commanded_tilt_deg: float | None
     telemetry: Telemetry | None

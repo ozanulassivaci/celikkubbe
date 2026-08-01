@@ -3,7 +3,21 @@
 from __future__ import annotations
 
 from celikkubbe.core import config
-from celikkubbe.core.types import TargetClass, Track
+from celikkubbe.core.types import IFF, TargetClass, Track
+
+
+def filter_engageable(tracks: list[Track]) -> list[Track]:
+    """Tracks eligible for autonomous engagement selection.
+
+    FRIENDLY is fail-safe and permanent — IFF voting never un-commits
+    from it once earned — so a friendly track is excluded here rather
+    than merely scored low; it must never enter the candidate list, let
+    alone be selected. It still appears in ``SystemState.tracks`` and
+    still gets a risk_score like any other track: the UI shows
+    friendlies with blue boxes and counts them in the classification
+    summary. This exclusion is scoped to engagement selection only.
+    """
+    return [t for t in tracks if t.iff is not IFF.FRIENDLY]
 
 
 def compute_risk_score(

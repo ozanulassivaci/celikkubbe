@@ -1,18 +1,18 @@
 from __future__ import annotations
 
 from celikkubbe.core import config
-from celikkubbe.core.priority import compute_risk_score, order_track_ids
+from celikkubbe.core.priority import compute_risk_score, filter_engageable, order_track_ids
 from celikkubbe.core.types import IFF, TargetClass, Track, TrackStatus
 
 
-def make_track(track_id: int, risk_score: float) -> Track:
+def make_track(track_id: int, risk_score: float, iff: IFF = IFF.HOSTILE) -> Track:
     return Track(
         track_id=track_id,
         cls=TargetClass.UAV,
         confidence=0.9,
         range_m=5.0,
         range_source="depth",
-        iff=IFF.HOSTILE,
+        iff=iff,
         bbox=(0.0, 0.0, 0.1, 0.1),
         velocity=(0.0, 0.0),
         status=TrackStatus.CONFIRMED,
@@ -61,3 +61,18 @@ def test_order_inserts_new_track_by_score() -> None:
     tracks = [make_track(1, 40.0), make_track(2, 90.0)]
     order = order_track_ids(tracks, previous_order=[1])
     assert order == [2, 1]
+
+
+def test_filter_engageable_excludes_friendly_tracks() -> None:
+    tracks = [
+        make_track(1, 50.0, iff=IFF.HOSTILE),
+        make_track(2, 90.0, iff=IFF.FRIENDLY),
+        make_track(3, 10.0, iff=IFF.UNKNOWN),
+    ]
+    engageable = filter_engageable(tracks)
+    assert {t.track_id for t in engageable} == {1, 3}
+
+
+def test_filter_engageable_keeps_all_when_none_are_friendly() -> None:
+    tracks = [make_track(1, 50.0), make_track(2, 10.0)]
+    assert filter_engageable(tracks) == tracks

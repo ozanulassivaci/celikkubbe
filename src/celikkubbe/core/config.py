@@ -53,6 +53,8 @@ L1_RECOVERY_FRAMES = 5  # consecutive healthy probes required to return
 MAX_ENGAGEMENT_ATTEMPTS = 3  # then skip the target
 HIT_VERIFY_MS = 1500
 DEFAULT_RANGE_M = 10.0  # parallax assumption when nothing is locked
+GATE_REJECT_TIMEOUT_MS = 1000  # stuck in S4 this long on a deferrable reason -> defer this track
+DEFER_COOLDOWN_MS = 3000  # excluded from selection for this long once deferred
 
 # --- class/range rule (Stage 3) ---
 # A class absent from this table is rejected (RangeGate fails closed), not
