@@ -15,7 +15,6 @@ from celikkubbe.core.commands import (
     Jog,
     SetMode,
     SetParam,
-    SetVelocity,
     SoftEstop,
     Zero,
 )
@@ -159,11 +158,6 @@ def test_encode_fire() -> None:
 def test_encode_set_param() -> None:
     payload, _ = _split_frame(codec.encode_command(SetParam("trigger_pulse_ms", 60.0), seq=8))
     assert payload == {"cmd": "param", "id": "trigger_pulse_ms", "v": 60.0, "seq": 8}
-
-
-def test_encode_set_velocity_has_no_wire_equivalent() -> None:
-    with pytest.raises(NotImplementedError, match="no wire encoding"):
-        codec.encode_command(SetVelocity(1.0, 2.0), seq=1)
 
 
 def test_encode_heartbeat() -> None:

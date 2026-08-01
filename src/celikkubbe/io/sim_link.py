@@ -32,7 +32,6 @@ from celikkubbe.core.commands import (
     Jog,
     SetMode,
     SetParam,
-    SetVelocity,
     SoftEstop,
     Zero,
 )
@@ -367,8 +366,6 @@ class SimTurretLink:
             self._trip_estop()
         elif isinstance(cmd, SetMode | Home | SetParam):
             self.last_ack = AckResult.OK  # accepted, no behaviour modelled
-        elif isinstance(cmd, SetVelocity):
-            self.last_ack = AckResult.UNKNOWN_COMMAND  # no wire equivalent -- see codec.py
 
     def _handle_fire(self, cmd: Fire) -> None:
         # Estop and driver alarm both also disarm as a side effect (see

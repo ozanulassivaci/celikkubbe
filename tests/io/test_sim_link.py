@@ -12,7 +12,6 @@ from celikkubbe.core.commands import (
     Jog,
     SetMode,
     SetParam,
-    SetVelocity,
     SoftEstop,
     Zero,
 )
@@ -306,13 +305,6 @@ def test_set_mode_and_set_param_are_accepted_without_modelled_behaviour() -> Non
     assert link.last_ack is AckResult.OK
     link.send(Home((Axis.PAN,)))
     assert link.last_ack is AckResult.OK
-
-
-def test_set_velocity_has_no_wire_equivalent_in_sim_either() -> None:
-    clock = FakeClock()
-    link = SimTurretLink(clock)
-    link.send(SetVelocity(1.0, 2.0))
-    assert link.last_ack is AckResult.UNKNOWN_COMMAND
 
 
 def test_send_tracked_returns_seq_and_records_ack() -> None:

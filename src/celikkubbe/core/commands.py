@@ -32,12 +32,6 @@ class Jog:
 
 
 @dataclass(frozen=True)
-class SetVelocity:
-    pan_dps: float
-    tilt_dps: float
-
-
-@dataclass(frozen=True)
 class Home:
     axes: tuple[Axis, ...]
 
@@ -83,6 +77,4 @@ class Zero:
     value_deg: float
 
 
-Command = (
-    SetMode | Goto | Jog | SetVelocity | Home | Zero | Arm | Disarm | Fire | SoftEstop | SetParam
-)
+Command = SetMode | Goto | Jog | Home | Zero | Arm | Disarm | Fire | SoftEstop | SetParam

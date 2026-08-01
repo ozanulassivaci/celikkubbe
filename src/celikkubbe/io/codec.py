@@ -29,7 +29,6 @@ from celikkubbe.core.commands import (
     Jog,
     SetMode,
     SetParam,
-    SetVelocity,
     SoftEstop,
     Zero,
 )
@@ -108,15 +107,6 @@ def _command_payload(cmd: Command) -> dict[str, object]:
         return {"cmd": "estop"}
     if isinstance(cmd, SetParam):
         return {"cmd": "param", "id": cmd.param_id, "v": round(cmd.value, 2)}
-    if isinstance(cmd, SetVelocity):
-        # protocol v1 has no simultaneous pan+tilt velocity command, only
-        # single-axis `jog` -- and nothing in core/ emits SetVelocity today.
-        # Fail loudly rather than invent an encoding the firmware can't
-        # possibly understand.
-        raise NotImplementedError(
-            "SetVelocity has no wire encoding in docs/protocol.md v1 (section 5); "
-            "use Jog for continuous single-axis motion instead"
-        )
     raise TypeError(f"unknown command type: {type(cmd).__name__}")  # pragma: no cover — exhaustive
 
 
