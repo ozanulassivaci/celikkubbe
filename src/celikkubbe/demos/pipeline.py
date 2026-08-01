@@ -10,6 +10,18 @@ Usage:
     python -m celikkubbe.demos.pipeline --source synthetic --targets 3
     python -m celikkubbe.demos.pipeline --source video --path clip.mp4
     python -m celikkubbe.demos.pipeline --source webcam --device 0
+    python -m celikkubbe.demos.pipeline --source synthetic --link sim
+    python -m celikkubbe.demos.pipeline --source synthetic --link sim \
+        --inject estop@5s --inject release_estop@8s
+
+--link sim swaps the lightweight bearing-tracker stub for
+io.sim_link.SimTurretLink (real trapezoidal motion, backlash, gravity
+droop on e-stop, and an independent watchdog/safety authority) with no
+LinkWorker in between -- this loop calls send_heartbeat()/poll() itself.
+--inject schedules a fault at a wall-clock offset from when the demo
+started: estop, release_estop, driver_alarm_pan, driver_alarm_tilt,
+clear_driver_alarm_pan, clear_driver_alarm_tilt, link_dropout[:seconds],
+crc_errors[:rate], latency[:ms].
 
 The aim solver here is a placeholder bearing-only conversion (pixel
 offset from centre -> angle via intrinsics, no lead compensation, no
@@ -33,6 +45,7 @@ from celikkubbe.core.engagement import step as engagement_step
 from celikkubbe.core.protocols import Clock
 from celikkubbe.core.types import (
     IFF,
+    Axis,
     CameraIntrinsics,
     EngagementState,
     HitResult,
@@ -46,6 +59,7 @@ from celikkubbe.core.types import (
     Track,
     TrackStatus,
 )
+from celikkubbe.io.sim_link import SimTurretLink
 from celikkubbe.tracking.manager import TrackManager
 from celikkubbe.vision.l2_color import ColorDetector
 from celikkubbe.vision.sources import (
@@ -159,6 +173,50 @@ def stub_aim_solutions(
     return solutions
 
 
+@dataclasses.dataclass(frozen=True)
+class _Injection:
+    at_t: float
+    name: str
+    value: float | None
+    label: str
+
+
+def _apply_injection(link: SimTurretLink, name: str, value: float | None) -> None:
+    if name == "estop":
+        link.inject_estop()
+    elif name == "release_estop":
+        link.release_estop()
+    elif name == "driver_alarm_pan":
+        link.inject_driver_alarm(Axis.PAN)
+    elif name == "driver_alarm_tilt":
+        link.inject_driver_alarm(Axis.TILT)
+    elif name == "clear_driver_alarm_pan":
+        link.clear_driver_alarm(Axis.PAN)
+    elif name == "clear_driver_alarm_tilt":
+        link.clear_driver_alarm(Axis.TILT)
+    elif name == "link_dropout":
+        link.inject_link_dropout(value if value is not None else 1.0)
+    elif name == "crc_errors":
+        link.inject_crc_errors(value if value is not None else 0.2)
+    elif name == "latency":
+        link.set_latency(value if value is not None else 100.0)
+    else:
+        raise ValueError(f"unknown --inject fault: {name!r}")
+
+
+def _parse_injection(spec: str) -> _Injection:
+    left, sep, time_part = spec.partition("@")
+    if not sep or not time_part.endswith("s"):
+        raise ValueError(f"--inject must look like NAME[:VALUE]@TIMEs, got {spec!r}")
+    try:
+        at_t = float(time_part[:-1])
+    except ValueError as e:
+        raise ValueError(f"--inject time must be numeric seconds, got {spec!r}") from e
+    name, _, value_str = left.partition(":")
+    value = float(value_str) if value_str else None
+    return _Injection(at_t=at_t, name=name, value=value, label=spec)
+
+
 def _build_source(args: argparse.Namespace, clock: Clock):
     if args.source == "synthetic":
         # Stationary by default: a moving target combined with the
@@ -207,9 +265,30 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument(
         "--frames", type=int, default=None, help="stop after N ticks (default: run until Ctrl+C)"
     )
+    parser.add_argument(
+        "--link",
+        choices=["stub", "sim"],
+        default="stub",
+        help="stub: lightweight bearing-tracker (default); "
+        "sim: io.sim_link.SimTurretLink with backlash, gravity droop and fault injection",
+    )
+    parser.add_argument(
+        "--inject",
+        action="append",
+        default=[],
+        metavar="NAME[:VALUE]@TIMEs",
+        help="fault to inject at a simulated wall-clock time, e.g. estop@5s or "
+        "crc_errors:0.2@2s -- requires --link sim; may be given more than once",
+    )
     args = parser.parse_args(argv)
     if args.source == "video" and not args.path:
         parser.error("--source video requires --path")
+    if args.inject and args.link != "sim":
+        parser.error("--inject requires --link sim")
+    try:
+        args.inject = [_parse_injection(spec) for spec in args.inject]
+    except ValueError as e:
+        parser.error(str(e))
     return args
 
 
@@ -218,12 +297,15 @@ def run(argv: list[str] | None = None) -> None:
     stage = {"1": Stage.STAGE_1, "2": Stage.STAGE_2, "3": Stage.STAGE_3}[args.stage]
 
     clock = SystemClock()
+    run_start_t = clock.now()
     source = _build_source(args, clock)
     source.start()
 
     detector = ColorDetector()
     tracker = TrackManager(clock)
-    turret = SimulatedTurretLink(clock)
+    turret = SimTurretLink(clock) if args.link == "sim" else SimulatedTurretLink(clock)
+    pending_injections = sorted(args.inject, key=lambda inj: inj.at_t)
+    last_ammo_fired = 0
 
     self_test = SelfTestResult(
         items=(
@@ -282,6 +364,14 @@ def run(argv: list[str] | None = None) -> None:
             ]
             previous_order = priority.order_track_ids(scored, previous_order)
 
+            if isinstance(turret, SimTurretLink):
+                turret.send_heartbeat()  # no LinkWorker in this demo -- keep its watchdog fed
+                elapsed = clock.now() - run_start_t
+                while pending_injections and pending_injections[0].at_t <= elapsed:
+                    injection = pending_injections.pop(0)
+                    _apply_injection(turret, injection.name, injection.value)
+                    print(f"[INJECT] t={elapsed:6.1f}s {injection.label}")
+
             telemetry = turret.poll()
 
             self_test_result = self_test if state.mode is Mode.M1_INIT else None
@@ -299,7 +389,14 @@ def run(argv: list[str] | None = None) -> None:
                 turret.send(cmd)
 
             aim_solutions = stub_aim_solutions(scored, frame.intrinsics)
-            hit_result = turret.take_hit_result()
+            if isinstance(turret, SimTurretLink):
+                # No vision-based hit verification in this demo either way
+                # -- a shot the sim actually accepted resolves to a KILL,
+                # purely to exercise S6 -> S1.
+                hit_result = HitResult.KILL if turret.ammo_fired > last_ammo_fired else None
+                last_ammo_fired = turret.ammo_fired
+            else:
+                hit_result = turret.take_hit_result()
             state = dataclasses.replace(state, mode=next_mode, tracks=tuple(scored))
 
             engagement_result = engagement_step(

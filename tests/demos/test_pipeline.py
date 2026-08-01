@@ -9,7 +9,14 @@ import pytest
 from celikkubbe.core.clock import FakeClock
 from celikkubbe.core.commands import Arm, Disarm, Fire, Goto, SoftEstop
 from celikkubbe.core.types import IFF, HitResult, Track, TrackStatus
-from celikkubbe.demos.pipeline import SimulatedTurretLink, run, stub_aim_solutions
+from celikkubbe.demos.pipeline import (
+    SimulatedTurretLink,
+    _apply_injection,
+    _parse_injection,
+    run,
+    stub_aim_solutions,
+)
+from celikkubbe.io.sim_link import SimTurretLink
 from celikkubbe.vision.sources import estimated_intrinsics
 
 
@@ -117,6 +124,89 @@ def test_simulated_turret_link_fire_schedules_a_kill_next_poll() -> None:
     link.send(Fire(count=1))
     assert link.take_hit_result() is HitResult.KILL
     assert link.take_hit_result() is None  # consumed, not repeated
+
+
+def test_pipeline_runs_with_sim_link() -> None:
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        run(["--source", "synthetic", "--targets", "1", "--frames", "5", "--link", "sim"])
+    lines = [line for line in buf.getvalue().splitlines() if line.strip()]
+    assert len(lines) == 5
+    assert "mode=" in lines[0]
+
+
+def test_pipeline_applies_injection_with_sim_link() -> None:
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        run(
+            [
+                "--source",
+                "synthetic",
+                "--targets",
+                "1",
+                "--frames",
+                "5",
+                "--link",
+                "sim",
+                "--inject",
+                "estop@0.0s",
+            ]
+        )
+    output = buf.getvalue()
+    assert "[INJECT]" in output
+    assert "estop@0.0s" in output
+
+
+def test_pipeline_inject_requires_link_sim() -> None:
+    with pytest.raises(SystemExit):
+        run(["--source", "synthetic", "--inject", "estop@1s"])
+
+
+def test_pipeline_inject_rejects_malformed_spec() -> None:
+    with pytest.raises(SystemExit):
+        run(["--source", "synthetic", "--link", "sim", "--inject", "bogus"])
+
+
+def test_parse_injection_simple_spec() -> None:
+    injection = _parse_injection("estop@5s")
+    assert injection.at_t == 5.0
+    assert injection.name == "estop"
+    assert injection.value is None
+
+
+def test_parse_injection_with_value() -> None:
+    injection = _parse_injection("crc_errors:0.3@2.5s")
+    assert injection.at_t == 2.5
+    assert injection.name == "crc_errors"
+    assert injection.value == 0.3
+
+
+@pytest.mark.parametrize("spec", ["estop", "estop@5", "estop@fives"])
+def test_parse_injection_rejects_malformed_specs(spec: str) -> None:
+    with pytest.raises(ValueError):
+        _parse_injection(spec)
+
+
+def test_apply_injection_dispatches_every_documented_fault() -> None:
+    link = SimTurretLink(FakeClock())
+    for name, value in [
+        ("estop", None),
+        ("release_estop", None),
+        ("driver_alarm_pan", None),
+        ("driver_alarm_tilt", None),
+        ("clear_driver_alarm_pan", None),
+        ("clear_driver_alarm_tilt", None),
+        ("link_dropout", 0.5),
+        ("crc_errors", 0.1),
+        ("latency", 50.0),
+    ]:
+        _apply_injection(link, name, value)  # must not raise
+
+
+def test_apply_injection_rejects_unknown_fault() -> None:
+    link = SimTurretLink(FakeClock())
+    with pytest.raises(ValueError):
+        _apply_injection(link, "not_a_real_fault", None)
 
 
 def test_stub_aim_solutions_centred_track_points_straight_ahead() -> None:
