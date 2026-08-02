@@ -1,8 +1,13 @@
-"""Turkish UI strings keyed by ReasonCode.
+"""Turkish UI strings.
 
 The only place in this codebase where user-facing language lives. Nothing
 in the decision logic imports this module; the outer UI layer maps a
-``ReasonCode`` to text with ``REASON_CODE_TR`` when it needs to display one.
+``ReasonCode`` to text with ``REASON_CODE_TR``, or looks up a fixed label
+with no associated code (an axis name, a badge, a banner prefix) in
+``UI_LABEL_TR``, whenever it needs to display one. ``ui/`` widget code
+must never inline a Turkish literal itself -- both dicts exist so every
+string a competition operator sees can be found, and changed, in one
+place, even the ones with no ``ReasonCode`` to key off.
 """
 
 from __future__ import annotations
@@ -35,3 +40,16 @@ REASON_CODE_TR: dict[ReasonCode, str] = {
 
 def describe(reason: ReasonCode) -> str:
     return REASON_CODE_TR[reason]
+
+
+# Fixed UI labels with no ReasonCode of their own -- badges, axis names,
+# banner text. Keyed by a short English slug rather than an enum, since
+# these are presentation labels, not decision-logic outcomes; nothing
+# here is looked up by anything in core/.
+UI_LABEL_TR: dict[str, str] = {
+    "UNKNOWN_CLASS": "BİLİNMEYEN",
+    "NOT_CALIBRATED": "KALİBRE DEĞİL",
+    "TARGET_LOCKED": "HEDEF KİLİTLİ",
+    "AXIS_PAN": "PAN",
+    "AXIS_TILT": "EĞİM",
+}
