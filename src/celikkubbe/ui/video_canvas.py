@@ -35,12 +35,13 @@ from PyQt6.QtGui import (
 from PyQt6.QtWidgets import QWidget
 
 from celikkubbe.core import config
-from celikkubbe.core.strings import UI_LABEL_TR
+from celikkubbe.core.strings import TARGET_CLASS_TR, UI_LABEL_TR
 from celikkubbe.core.types import (
     IFF,
     CameraIntrinsics,
     EngagementState,
     Stage,
+    TargetClass,
     Track,
     TrackStatus,
 )
@@ -51,6 +52,14 @@ from celikkubbe.ui.theme import AngleGauge
 
 _HEADER_HEIGHT_PX = 22
 _TELEMETRY_HEIGHT_PX = 46
+# OPERATOR AKTİF / TAKİP YARDIMI ON, drawn just above the telemetry
+# strip's pan/tilt rows. lock_banner_rect reads this too, rather than the
+# lock banner independently guessing its own clearance -- the two used to
+# be positioned from separate magic numbers and silently overlapped
+# whenever a locked target coincided with the indicator row.
+_INDICATOR_ROW_HEIGHT_PX = 16
+_LOCK_BANNER_HEIGHT_PX = 20
+_LOCK_BANNER_GAP_PX = 4
 _LOCK_ENGAGEMENT_STATES = (
     EngagementState.S4_AIM,
     EngagementState.S5_ENGAGE,
@@ -186,6 +195,32 @@ def place_badge(
     if label_y + label_h > frame.bottom():
         label_y = y - radius - 4.0 - label_h
     return QRectF(label_x, label_y, label_w, label_h)
+
+
+def indicator_row_top(strip_top: float) -> float:
+    """Top y-coordinate of the OPERATOR AKTİF / TAKİP YARDIMI ON row,
+    which sits just above the telemetry strip itself.
+    """
+    return strip_top - _INDICATOR_ROW_HEIGHT_PX
+
+
+def lock_banner_rect(frame: QRectF, strip_top: float) -> QRectF:
+    """Where the HEDEF KİLİTLİ banner sits: centred across the image,
+    directly above the indicator row with a fixed clearance gap -- both
+    derive from the same ``_INDICATOR_ROW_HEIGHT_PX`` so they cannot
+    silently drift back into overlapping each other.
+    """
+    bottom = indicator_row_top(strip_top) - _LOCK_BANNER_GAP_PX
+    top = bottom - _LOCK_BANNER_HEIGHT_PX
+    return QRectF(frame.left(), top, frame.width(), _LOCK_BANNER_HEIGHT_PX)
+
+
+def class_label(cls: TargetClass | None) -> str:
+    """A track's class, in Turkish -- or BİLİNMEYEN when there is none.
+    Shared by the box label and the lock banner so both stay in sync,
+    and so this is the one place to change if TARGET_CLASS_TR grows.
+    """
+    return TARGET_CLASS_TR[cls] if cls is not None else UI_LABEL_TR["UNKNOWN_CLASS"]
 
 
 _IFF_COLOR: dict[IFF, str] = {
@@ -356,7 +391,7 @@ class VideoCanvas(QWidget):
 
     @staticmethod
     def _format_label(track: Track) -> str:
-        cls_label = track.cls.value if track.cls is not None else UI_LABEL_TR["UNKNOWN_CLASS"]
+        cls_label = class_label(track.cls)
         range_str = "--"
         if track.range_m is not None:
             prefix = "~" if track.range_source == "size" else ""
@@ -510,18 +545,13 @@ class VideoCanvas(QWidget):
         track = next((t for t in snapshot.tracks if t.track_id == selected_id), None)
         if track is None:
             return
-        cls_label = track.cls.value if track.cls is not None else UI_LABEL_TR["UNKNOWN_CLASS"]
+        cls_label = class_label(track.cls)
         text = f"{UI_LABEL_TR['TARGET_LOCKED']} — {cls_label}"
 
         painter.setFont(self._strip_font)
         painter.setPen(self._pen_danger)
-        frame_bottom = self._transform.offset_y + self._transform.displayed_h
-        rect = QRectF(
-            self._transform.offset_x,
-            frame_bottom - _TELEMETRY_HEIGHT_PX - 26,
-            self._transform.displayed_w,
-            20,
-        )
+        strip_top = self._transform.offset_y + self._transform.displayed_h - _TELEMETRY_HEIGHT_PX
+        rect = lock_banner_rect(self._image_rect(), strip_top)
         painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, text)
 
     def _draw_header_strip(self, painter: QPainter, snapshot: UiSnapshot) -> None:
@@ -570,15 +600,16 @@ class VideoCanvas(QWidget):
         operator_pen = QPen(QColor(theme.OK if operator_active else theme.TEXT_MUTED))
         tracking_pen = QPen(QColor(theme.OK if tracking_aid_on else theme.TEXT_MUTED))
 
+        indicator_top = indicator_row_top(strip_top)
         painter.setPen(operator_pen)
         painter.drawText(
-            QRectF(left, strip_top - 16, self._transform.displayed_w - 12, 14),
+            QRectF(left, indicator_top, self._transform.displayed_w - 12, 14),
             Qt.AlignmentFlag.AlignLeft,
             UI_LABEL_TR["OPERATOR_ACTIVE"],
         )
         painter.setPen(tracking_pen)
         painter.drawText(
-            QRectF(left + 140, strip_top - 16, self._transform.displayed_w - 12, 14),
+            QRectF(left + 140, indicator_top, self._transform.displayed_w - 12, 14),
             Qt.AlignmentFlag.AlignLeft,
             UI_LABEL_TR["TRACKING_AID_ON"],
         )

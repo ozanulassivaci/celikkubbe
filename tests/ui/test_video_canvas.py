@@ -27,7 +27,9 @@ from celikkubbe.ui.video_canvas import (
     VideoCanvas,
     compute_letterbox,
     frame_to_pixmap,
+    indicator_row_top,
     inset_point,
+    lock_banner_rect,
     place_badge,
     place_label,
 )
@@ -331,6 +333,17 @@ def test_pinned_crosshair_is_fully_visible_at_all_four_edges(x, y):
 def test_inset_point_leaves_a_point_already_inside_the_margin_unchanged():
     frame = QRectF(0.0, 0.0, 400.0, 300.0)
     assert inset_point(200.0, 150.0, 18.0, frame) == (200.0, 150.0)
+
+
+def test_lock_banner_never_overlaps_the_indicator_row_above_the_telemetry_strip():
+    # Regression: HEDEF KİLİTLİ and TAKİP YARDIMI ON used to be positioned
+    # from two independent magic numbers and visibly overlapped whenever
+    # both were on screen at once -- found by looking at a real
+    # screenshot, not by any pixel-sampling test.
+    frame = QRectF(0.0, 0.0, 640.0, 480.0)
+    strip_top = 400.0
+    banner = lock_banner_rect(frame, strip_top)
+    assert banner.bottom() <= indicator_row_top(strip_top)
 
 
 # --- box colours ---
