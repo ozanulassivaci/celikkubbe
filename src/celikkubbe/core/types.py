@@ -73,6 +73,20 @@ class Axis(Enum):
     TILT = "TILT"
 
 
+class McuMode(Enum):
+    """The MCU's own internal mode, echoed in Telemetry.status bits 11-13
+    (docs/protocol.md section 4) -- distinct from the PC-side Mode above.
+    Only IDLE/READY/SAFE are ever commanded (via SetMode); BOOT and MOVING
+    are states the MCU reports on its own.
+    """
+
+    BOOT = "BOOT"
+    IDLE = "IDLE"
+    READY = "READY"
+    MOVING = "MOVING"
+    SAFE = "SAFE"
+
+
 class HitResult(Enum):
     KILL = "KILL"
     MISS = "MISS"
@@ -105,6 +119,7 @@ class ReasonCode(Enum):
     MOTION_IN_PROGRESS = "MOTION_IN_PROGRESS"
     DRIVER_ALARM = "DRIVER_ALARM"
     IFF_UNKNOWN = "IFF_UNKNOWN"
+    NOT_HOMED = "NOT_HOMED"
 
 
 @dataclass(frozen=True)
@@ -215,6 +230,14 @@ class Telemetry:
     position_valid: bool
     driver_alarm_pan: bool
     driver_alarm_tilt: bool
+    # Decision inputs, not diagnostics: modes.py refuses M3 OPERATIONAL
+    # until both homing bits are set (docs/protocol.md section 5 — there
+    # are no limit switches, so `zero` is the only homing mechanism), and
+    # mcu_mode lets modes.py notice the MCU disagreeing with what the PC
+    # last commanded via SetMode.
+    homed_pan: bool
+    homed_tilt: bool
+    mcu_mode: McuMode
     fan_rpm: tuple[int, int, int]
     mcu_temp_c: float
     loop_time_us: int

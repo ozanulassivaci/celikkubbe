@@ -19,7 +19,7 @@ from celikkubbe.core.commands import (
     Stop,
     Zero,
 )
-from celikkubbe.core.types import Axis, Mode
+from celikkubbe.core.types import Axis, McuMode, Mode
 from celikkubbe.io import codec
 
 # Independent transcription of docs/protocol.md section 4's telemetry_t,
@@ -320,8 +320,8 @@ def test_status_bitfield_unpacks_every_boolean_bit() -> None:
     assert frame.telemetry.motion_complete is True
     assert frame.telemetry.driver_alarm_pan is True
     assert frame.telemetry.driver_alarm_tilt is True
-    assert frame.homed_pan is True
-    assert frame.homed_tilt is True
+    assert frame.telemetry.homed_pan is True
+    assert frame.telemetry.homed_tilt is True
     assert frame.watchdog_tripped is True
     assert frame.limit_pan is True
     assert frame.limit_tilt is True
@@ -333,27 +333,27 @@ def test_status_bitfield_all_clear() -> None:
     (frame,) = parser.feed(frame_bytes)
 
     assert frame.telemetry.armed is False
-    assert frame.homed_pan is False
-    assert frame.mcu_mode is codec.McuMode.BOOT
+    assert frame.telemetry.homed_pan is False
+    assert frame.telemetry.mcu_mode is McuMode.BOOT
 
 
 @pytest.mark.parametrize(
     ("mode_bits", "expected"),
     [
-        (0, codec.McuMode.BOOT),
-        (1, codec.McuMode.IDLE),
-        (2, codec.McuMode.READY),
-        (3, codec.McuMode.MOVING),
-        (4, codec.McuMode.SAFE),
+        (0, McuMode.BOOT),
+        (1, McuMode.IDLE),
+        (2, McuMode.READY),
+        (3, McuMode.MOVING),
+        (4, McuMode.SAFE),
     ],
 )
-def test_mcu_mode_boundary_values(mode_bits: int, expected: codec.McuMode) -> None:
+def test_mcu_mode_boundary_values(mode_bits: int, expected: McuMode) -> None:
     parser = codec.FrameParser(FakeClock())
     frame_bytes = _build_inbound_frame(
         codec.TYPE_TELEMETRY, 1, _telemetry_payload(status=mode_bits << 11)
     )
     (frame,) = parser.feed(frame_bytes)
-    assert frame.mcu_mode is expected
+    assert frame.telemetry.mcu_mode is expected
 
 
 def test_undefined_mcu_mode_value_is_treated_as_corrupt() -> None:

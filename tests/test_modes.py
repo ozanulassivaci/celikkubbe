@@ -28,13 +28,33 @@ def test_m1_drops_to_m4_when_self_test_fails() -> None:
     assert Disarm() in commands
 
 
-def test_m2_advances_to_m3_on_operator_go() -> None:
-    telemetry = make_telemetry(t=0.0)
+def test_m2_advances_to_m3_on_operator_go_when_homed() -> None:
+    telemetry = make_telemetry(t=0.0, homed_pan=True, homed_tilt=True)
     mode, commands = modes.step(
         Mode.M2_STANDBY, telemetry, None, True, Mode.M3_OPERATIONAL, False, now=0.0
     )
     assert mode is Mode.M3_OPERATIONAL
     assert Arm() in commands
+
+
+def test_m2_blocked_from_m3_when_not_homed() -> None:
+    # docs/protocol.md section 5: no limit switches exist, so the PC must
+    # refuse OPERATIONAL until the operator has zeroed both axes.
+    telemetry = make_telemetry(t=0.0, homed_pan=False, homed_tilt=False)
+    mode, commands = modes.step(
+        Mode.M2_STANDBY, telemetry, None, True, Mode.M3_OPERATIONAL, False, now=0.0
+    )
+    assert mode is Mode.M2_STANDBY
+    assert commands == []
+
+
+def test_m2_blocked_from_m3_when_only_one_axis_homed() -> None:
+    telemetry = make_telemetry(t=0.0, homed_pan=True, homed_tilt=False)
+    mode, commands = modes.step(
+        Mode.M2_STANDBY, telemetry, None, True, Mode.M3_OPERATIONAL, False, now=0.0
+    )
+    assert mode is Mode.M2_STANDBY
+    assert commands == []
 
 
 def test_m2_stays_without_operator_request() -> None:

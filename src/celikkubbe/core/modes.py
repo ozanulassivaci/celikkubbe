@@ -31,6 +31,12 @@ def _estop_active(telemetry: Telemetry | None) -> bool:
     return telemetry is not None and telemetry.estop
 
 
+def _homed(telemetry: Telemetry | None) -> bool:
+    # docs/protocol.md section 5: no limit switches exist, so the PC must
+    # refuse OPERATIONAL until the operator has zeroed both axes by eye.
+    return telemetry is not None and telemetry.homed_pan and telemetry.homed_tilt
+
+
 def _enter_safe() -> tuple[Mode, list[Command]]:
     return Mode.M4_SAFE, [SoftEstop(), Disarm(), SetMode(Mode.M4_SAFE)]
 
@@ -61,7 +67,7 @@ def step(
         return _enter_safe()
 
     if mode is Mode.M2_STANDBY:
-        if operator_requested_mode is Mode.M3_OPERATIONAL:
+        if operator_requested_mode is Mode.M3_OPERATIONAL and _homed(telemetry):
             return Mode.M3_OPERATIONAL, [SetMode(Mode.M3_OPERATIONAL), Arm()]
         return Mode.M2_STANDBY, []
 

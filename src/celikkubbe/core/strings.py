@@ -29,6 +29,7 @@ REASON_CODE_TR: dict[ReasonCode, str] = {
     ReasonCode.MOTION_IN_PROGRESS: "Hareket henuz tamamlanmadi",
     ReasonCode.DRIVER_ALARM: "Surucu alarmi aktif",
     ReasonCode.IFF_UNKNOWN: "Dost/dusman bilgisi belirlenemedi",
+    ReasonCode.NOT_HOMED: "Eksenler henuz sifirlanmadi",
 }
 
 

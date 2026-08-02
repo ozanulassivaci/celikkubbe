@@ -40,7 +40,7 @@ import time
 from celikkubbe.core import config as core_config
 from celikkubbe.core import modes, priority
 from celikkubbe.core.clock import SystemClock
-from celikkubbe.core.commands import Arm, Command, Disarm, Fire, Goto, SoftEstop
+from celikkubbe.core.commands import Arm, Command, Disarm, Fire, Goto, SoftEstop, Zero
 from celikkubbe.core.engagement import step as engagement_step
 from celikkubbe.core.protocols import Clock
 from celikkubbe.core.types import (
@@ -50,6 +50,7 @@ from celikkubbe.core.types import (
     EngagementState,
     HitResult,
     Layer,
+    McuMode,
     Mode,
     SelfTestItem,
     SelfTestResult,
@@ -142,6 +143,11 @@ class SimulatedTurretLink:
             position_valid=not self._estop,
             driver_alarm_pan=False,
             driver_alarm_tilt=False,
+            # This stub doesn't model homing at all -- always report
+            # homed so it doesn't get stuck in M2_STANDBY.
+            homed_pan=True,
+            homed_tilt=True,
+            mcu_mode=McuMode.READY if self._armed else McuMode.IDLE,
             fan_rpm=(3000, 3000, 3000),
             mcu_temp_c=40.0,
             loop_time_us=500,
@@ -304,6 +310,13 @@ def run(argv: list[str] | None = None) -> None:
     detector = ColorDetector()
     tracker = TrackManager(clock)
     turret = SimTurretLink(clock) if args.link == "sim" else SimulatedTurretLink(clock)
+    if isinstance(turret, SimTurretLink):
+        # docs/protocol.md section 9's startup sequence: the operator
+        # centres the turret by eye and sends `zero` per axis. This demo
+        # has no operator, so pretend it already happened -- otherwise
+        # modes.py now correctly (and permanently) refuses OPERATIONAL.
+        turret.send(Zero(Axis.PAN, 0.0))
+        turret.send(Zero(Axis.TILT, 0.0))
     pending_injections = sorted(args.inject, key=lambda inj: inj.at_t)
     last_ammo_fired = 0
 

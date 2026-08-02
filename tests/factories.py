@@ -6,6 +6,7 @@ from celikkubbe.core.types import (
     IFF,
     EngagementState,
     Layer,
+    McuMode,
     Mode,
     Stage,
     SystemState,
@@ -54,6 +55,9 @@ def make_telemetry(
     position_valid: bool = True,
     driver_alarm_pan: bool = False,
     driver_alarm_tilt: bool = False,
+    homed_pan: bool = True,
+    homed_tilt: bool = True,
+    mcu_mode: McuMode = McuMode.READY,
 ) -> Telemetry:
     return Telemetry(
         t=t,
@@ -69,6 +73,9 @@ def make_telemetry(
         position_valid=position_valid,
         driver_alarm_pan=driver_alarm_pan,
         driver_alarm_tilt=driver_alarm_tilt,
+        homed_pan=homed_pan,
+        homed_tilt=homed_tilt,
+        mcu_mode=mcu_mode,
         fan_rpm=(3000, 3000, 3000),
         mcu_temp_c=40.0,
         loop_time_us=500,

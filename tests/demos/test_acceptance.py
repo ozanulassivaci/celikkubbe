@@ -17,8 +17,10 @@ import dataclasses
 
 from celikkubbe.core import modes, priority
 from celikkubbe.core.clock import FakeClock
+from celikkubbe.core.commands import Zero
 from celikkubbe.core.engagement import step as engagement_step
 from celikkubbe.core.types import (
+    Axis,
     EngagementState,
     HitResult,
     Layer,
@@ -60,6 +62,12 @@ class _Rig:
         self.detector = ColorDetector()
         self.tracker = TrackManager(clock)
         self.turret = SimTurretLink(clock)
+        # docs/protocol.md section 9's startup sequence: the operator
+        # centres the turret by eye and the GUI sends `zero` per axis
+        # before the PC will ever leave M2_STANDBY (modes.py refuses
+        # OPERATIONAL until both homing bits are set).
+        self.turret.send(Zero(Axis.PAN, 0.0))
+        self.turret.send(Zero(Axis.TILT, 0.0))
         self.state = SystemState(
             stage=Stage.STAGE_2,
             mode=Mode.M1_INIT,

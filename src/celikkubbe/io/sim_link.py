@@ -37,8 +37,19 @@ from celikkubbe.core.commands import (
     Zero,
 )
 from celikkubbe.core.protocols import Clock
-from celikkubbe.core.types import Axis, Telemetry
+from celikkubbe.core.types import Axis, McuMode, Mode, Telemetry
 from celikkubbe.io.codec import AckResult, EventId
+
+# The wire `mode` command only ever commands idle/ready/safe; MOVING is a
+# sub-state the MCU enters on its own while READY and actually slewing
+# (see _compute_mcu_mode). Mirrors codec._MODE_TO_WIRE's M1/M2 -> idle
+# collapse -- the MCU has no notion of "standby" either.
+_MODE_TO_MCU_MODE: dict[Mode, McuMode] = {
+    Mode.M1_INIT: McuMode.IDLE,
+    Mode.M2_STANDBY: McuMode.IDLE,
+    Mode.M3_OPERATIONAL: McuMode.READY,
+    Mode.M4_SAFE: McuMode.SAFE,
+}
 
 # Pan backlash for a module-5 spur pair (docs/protocol.md section 5). Tilt
 # uses a belt reduction, not modelled here -- gear backlash is a pan-only
@@ -235,6 +246,7 @@ class SimTurretLink:
         self._driver_alarm_tilt = False
         self._homed_pan = False
         self._homed_tilt = False
+        self._commanded_mcu_mode = McuMode.IDLE
         now = clock.now()
         self._last_update_t = now
         self._last_contact_t = now
@@ -336,6 +348,9 @@ class SimTurretLink:
             ),
             driver_alarm_pan=self._driver_alarm_pan,
             driver_alarm_tilt=self._driver_alarm_tilt,
+            homed_pan=self._homed_pan,
+            homed_tilt=self._homed_tilt,
+            mcu_mode=self._compute_mcu_mode(),
             fan_rpm=_FAN_RPM,
             mcu_temp_c=_MCU_TEMP_C,
             loop_time_us=_LOOP_TIME_US,
@@ -367,8 +382,21 @@ class SimTurretLink:
             self.last_ack = AckResult.OK
         elif isinstance(cmd, SoftEstop):
             self._trip_estop()
-        elif isinstance(cmd, SetMode | Home | SetParam):
+        elif isinstance(cmd, SetMode):
+            self._commanded_mcu_mode = _MODE_TO_MCU_MODE[cmd.mode]
+            self.last_ack = AckResult.OK
+        elif isinstance(cmd, Home | SetParam):
             self.last_ack = AckResult.OK  # accepted, no behaviour modelled
+
+    def _handle_stop(self, now: float) -> None:
+        # "Decelerate to rest" simplified to an immediate stop at the
+        # current position: jog itself already uses a near-infinite amax
+        # (see _handle_jog), so there is no real deceleration curve to
+        # match here either. Also cancels any in-progress Goto, including
+        # a pending backlash-overshoot leg.
+        self._pan.start_move(now, self._pan.position_deg, 1.0, 1.0)
+        self._tilt.start_move(now, self._tilt.position_deg, 1.0, 1.0)
+        self.last_ack = AckResult.OK
 
     def _handle_fire(self, cmd: Fire) -> None:
         # Estop and driver alarm both also disarm as a side effect (see
@@ -426,16 +454,6 @@ class SimTurretLink:
         axis.start_move(self._clock.now(), hi if speed > 0 else lo, abs(speed) or 1e-6, 1e9)
         self.last_ack = AckResult.OK
 
-    def _handle_stop(self, now: float) -> None:
-        # "Decelerate to rest" simplified to an immediate stop at the
-        # current position: jog itself already uses a near-infinite amax
-        # (see _handle_jog), so there is no real deceleration curve to
-        # match here either. Also cancels any in-progress Goto, including
-        # a pending backlash-overshoot leg.
-        self._pan.start_move(now, self._pan.position_deg, 1.0, 1.0)
-        self._tilt.start_move(now, self._tilt.position_deg, 1.0, 1.0)
-        self.last_ack = AckResult.OK
-
     def _handle_zero(self, cmd: Zero) -> None:
         if cmd.axis is Axis.PAN:
             self._pan.position_deg = cmd.value_deg
@@ -477,6 +495,34 @@ class SimTurretLink:
             self.watchdog_tripped = False
             self._pan.frozen = self._driver_alarm_pan
             self._tilt.frozen = self._driver_alarm_tilt
+
+    def _compute_mcu_mode(self) -> McuMode:
+        # Independent authority, same as the fire/aim rejection checks:
+        # reports SAFE the instant a fault condition is true, regardless
+        # of what the PC last commanded via SetMode -- it must not wait
+        # for the PC to notice and send SetMode(M4_SAFE) back.
+        if (
+            self._estop
+            or self.watchdog_tripped
+            or self._driver_alarm_pan
+            or self._driver_alarm_tilt
+        ):
+            return McuMode.SAFE
+        if self._commanded_mcu_mode is McuMode.READY:
+            # Velocity alone misses the very first instant of a move: a
+            # trapezoidal profile always starts from v=0, so right after
+            # start_move() velocity is legitimately still zero even though
+            # a trajectory is now pending. "Hasn't reached its leg target
+            # yet" catches that; velocity_dps == 0 only once truly at rest.
+            pan_moving = self._pan.position_deg != self._pan._leg_target_deg or bool(
+                self._pan._pending_targets
+            )
+            tilt_moving = self._tilt.position_deg != self._tilt._leg_target_deg or bool(
+                self._tilt._pending_targets
+            )
+            if pan_moving or tilt_moving:
+                return McuMode.MOVING
+        return self._commanded_mcu_mode
 
     def _advance_physics(self, now: float) -> None:
         if self._estop:

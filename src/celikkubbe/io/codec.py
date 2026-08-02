@@ -5,11 +5,12 @@ socket or serial I/O anywhere in this module. Byte layouts, field names and
 constants below mirror that document exactly; it is the authoritative
 source if the two ever disagree.
 
-``core.types.Telemetry`` does not carry every field the wire TELEMETRY
-payload has (``mcu_ms``, ``ammo_fired``, ``homed_pan``/``homed_tilt``,
-``mcu_mode``, ``watchdog_tripped``, ``limit_pan``/``limit_tilt``) — core/ is
-not touched by this codec, so ``TelemetryFrame`` below carries the full
-payload with a ``telemetry`` field for the subset that already fits.
+``core.types.Telemetry`` carries the wire TELEMETRY payload's decision
+inputs (``homed_pan``/``homed_tilt``, ``mcu_mode``) directly. The
+remaining wire fields (``mcu_ms``, ``ammo_fired``, ``watchdog_tripped``,
+``limit_pan``/``limit_tilt``) are diagnostics with no decision-logic
+consumer, so ``TelemetryFrame`` below carries only those alongside the
+``telemetry`` field.
 """
 
 from __future__ import annotations
@@ -34,7 +35,7 @@ from celikkubbe.core.commands import (
     Zero,
 )
 from celikkubbe.core.protocols import Clock
-from celikkubbe.core.types import Axis, Mode, Telemetry
+from celikkubbe.core.types import Axis, McuMode, Mode, Telemetry
 
 # --- CRC16-CCITT, poly 0x1021, init 0xFFFF, no reflection/xorout (NMEA-style) ---
 
@@ -181,12 +182,24 @@ _EXPECTED_PAYLOAD_LEN = {
 }
 
 
-class McuMode(Enum):
-    BOOT = 0
-    IDLE = 1
-    READY = 2
-    MOVING = 3
-    SAFE = 4
+# McuMode lives in core.types (modes.py needs it too); the wire only ever
+# carries its integer form, so map that back explicitly rather than
+# relying on McuMode(int) matching -- core.types.McuMode's values are
+# strings, like every other enum in that module.
+_MCU_MODE_FROM_WIRE: dict[int, McuMode] = {
+    0: McuMode.BOOT,
+    1: McuMode.IDLE,
+    2: McuMode.READY,
+    3: McuMode.MOVING,
+    4: McuMode.SAFE,
+}
+
+
+def _decode_mcu_mode(raw: int) -> McuMode:
+    try:
+        return _MCU_MODE_FROM_WIRE[raw]
+    except KeyError:
+        raise ValueError(f"undefined mcu_mode bits: {raw}") from None
 
 
 class AckResult(Enum):
@@ -225,9 +238,6 @@ class TelemetryFrame:
     telemetry: Telemetry
     mcu_ms: int
     ammo_fired: int
-    homed_pan: bool
-    homed_tilt: bool
-    mcu_mode: McuMode
     watchdog_tripped: bool
     limit_pan: bool
     limit_tilt: bool
@@ -292,6 +302,9 @@ def _decode_telemetry(seq: int, payload: bytes, t: float) -> TelemetryFrame:
         position_valid=bool(status & (1 << 2)),
         driver_alarm_pan=bool(status & (1 << 4)),
         driver_alarm_tilt=bool(status & (1 << 5)),
+        homed_pan=bool(status & (1 << 6)),
+        homed_tilt=bool(status & (1 << 7)),
+        mcu_mode=_decode_mcu_mode((status >> 11) & 0b111),
         fan_rpm=(fan0, fan1, fan2),
         mcu_temp_c=mcu_temp_c10 / 10.0,
         loop_time_us=loop_time_us,
@@ -302,9 +315,6 @@ def _decode_telemetry(seq: int, payload: bytes, t: float) -> TelemetryFrame:
         telemetry=telemetry,
         mcu_ms=mcu_ms,
         ammo_fired=ammo_fired,
-        homed_pan=bool(status & (1 << 6)),
-        homed_tilt=bool(status & (1 << 7)),
-        mcu_mode=McuMode((status >> 11) & 0b111),
         watchdog_tripped=bool(status & (1 << 8)),
         limit_pan=bool(status & (1 << 9)),
         limit_tilt=bool(status & (1 << 10)),

@@ -16,7 +16,7 @@ from celikkubbe.core.commands import (
     Stop,
     Zero,
 )
-from celikkubbe.core.types import Axis, Mode
+from celikkubbe.core.types import Axis, McuMode, Mode
 from celikkubbe.io.codec import AckResult, EventId
 from celikkubbe.io.sim_link import SimTurretLink, _Backlash
 
@@ -235,42 +235,6 @@ def test_jog_moves_continuously_toward_the_limit() -> None:
     assert telem.tilt_deg == pytest.approx(5.0, abs=0.5)
 
 
-def test_stop_halts_a_goto_in_progress() -> None:
-    clock = FakeClock()
-    link = SimTurretLink(clock)
-    link.send(Goto(100.0, 30.0, 10.0, 10.0))
-    clock.advance(0.1)
-    link.poll()
-
-    link.send(Stop())
-    telem = link.poll()
-
-    assert telem.motion_complete is True
-    assert telem.pan_vel_dps == 0.0
-    assert telem.tilt_vel_dps == 0.0
-    pan_after_stop = telem.pan_deg
-
-    clock.advance(1.0)
-    telem = link.poll()
-    assert telem.pan_deg == pan_after_stop  # stayed put, did not resume toward 100.0
-
-
-def test_stop_cancels_a_jog() -> None:
-    clock = FakeClock()
-    link = SimTurretLink(clock)
-    link.send(Jog(Axis.TILT, 1, 20.0))
-    clock.advance(0.2)
-    link.poll()
-
-    link.send(Stop())
-    telem = link.poll()
-    tilt_after_stop = telem.tilt_deg
-
-    clock.advance(0.5)
-    telem = link.poll()
-    assert telem.tilt_deg == tilt_after_stop
-
-
 def test_zero_declares_current_position_and_resets_backlash() -> None:
     clock = FakeClock()
     link = SimTurretLink(clock)
@@ -342,6 +306,81 @@ def test_set_mode_and_set_param_are_accepted_without_modelled_behaviour() -> Non
     assert link.last_ack is AckResult.OK
     link.send(Home((Axis.PAN,)))
     assert link.last_ack is AckResult.OK
+
+
+def test_stop_halts_a_goto_in_progress() -> None:
+    clock = FakeClock()
+    link = SimTurretLink(clock)
+    link.send(Goto(100.0, 30.0, 10.0, 10.0))
+    clock.advance(0.1)
+    link.poll()
+
+    link.send(Stop())
+    telem = link.poll()
+
+    assert telem.motion_complete is True
+    assert telem.pan_vel_dps == 0.0
+    assert telem.tilt_vel_dps == 0.0
+    pan_after_stop = telem.pan_deg
+
+    clock.advance(1.0)
+    telem = link.poll()
+    assert telem.pan_deg == pan_after_stop  # stayed put, did not resume toward 100.0
+
+
+def test_stop_cancels_a_jog() -> None:
+    clock = FakeClock()
+    link = SimTurretLink(clock)
+    link.send(Jog(Axis.TILT, 1, 20.0))
+    clock.advance(0.2)
+    link.poll()
+
+    link.send(Stop())
+    telem = link.poll()
+    tilt_after_stop = telem.tilt_deg
+
+    clock.advance(0.5)
+    telem = link.poll()
+    assert telem.tilt_deg == tilt_after_stop
+
+
+def test_mcu_mode_reports_ready_then_moving_then_ready() -> None:
+    clock = FakeClock()
+    link = SimTurretLink(clock)
+    link.send(SetMode(Mode.M3_OPERATIONAL))
+    assert link.poll().mcu_mode is McuMode.READY
+
+    link.send(Goto(50.0, 0.0, 10.0, 10.0))
+    telem = link.poll()
+    assert telem.mcu_mode is McuMode.MOVING
+
+    clock.advance(30.0)  # plenty of time to finish
+    link.send_heartbeat()  # otherwise the sim's own watchdog trips -> SAFE
+    telem = link.poll()
+    assert telem.mcu_mode is McuMode.READY
+
+
+def test_mcu_mode_reports_safe_independent_of_commanded_mode() -> None:
+    clock = FakeClock()
+    link = SimTurretLink(clock)
+    link.send(SetMode(Mode.M3_OPERATIONAL))
+    link.inject_estop()
+    telem = link.poll()
+    assert telem.mcu_mode is McuMode.SAFE
+
+
+def test_homed_flags_default_false_and_set_via_zero() -> None:
+    clock = FakeClock()
+    link = SimTurretLink(clock)
+    telem = link.poll()
+    assert telem.homed_pan is False
+    assert telem.homed_tilt is False
+
+    link.send(Zero(Axis.PAN, 0.0))
+    link.send(Zero(Axis.TILT, 0.0))
+    telem = link.poll()
+    assert telem.homed_pan is True
+    assert telem.homed_tilt is True
 
 
 def test_send_tracked_returns_seq_and_records_ack() -> None:
