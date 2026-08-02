@@ -327,6 +327,7 @@ class VideoCanvas(QWidget):
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(self._brush_label_bg)
         painter.drawRect(label_rect)
+        painter.setBrush(Qt.BrushStyle.NoBrush)  # don't leak a solid brush into the next draw call
         painter.setPen(QPen(color))
         painter.drawText(label_rect, Qt.AlignmentFlag.AlignCenter, text)
 
@@ -347,6 +348,7 @@ class VideoCanvas(QWidget):
         pen = QPen(color)
         pen.setWidth(2)
         painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)  # an outline reticle, not a filled disc
         radius = 14.0
         painter.drawEllipse(QPointF(x, y), radius, radius)
         for dx0, dx1, dy0, dy1 in (

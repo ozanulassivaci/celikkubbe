@@ -47,6 +47,13 @@ class SafeOverlay(QWidget):
         self._log = QPlainTextEdit()
         self._log.setReadOnly(True)
         self._log.setMaximumBlockCount(_MAX_LOG_LINES)
+        # QPlainTextEdit's palette defaults to a white background
+        # regardless of the app stylesheet's own colours -- without this
+        # it renders as a jarring white box in an otherwise dark shell.
+        self._log.setStyleSheet(
+            f"background-color: {theme.BG_ELEVATED}; color: {theme.TEXT_PRIMARY}; "
+            f"border: 1px solid {theme.BORDER};"
+        )
         outer.addWidget(self._log, stretch=1)
 
         ack_button = QPushButton("ACKNOWLEDGE")

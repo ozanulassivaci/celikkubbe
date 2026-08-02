@@ -84,20 +84,32 @@ class StatusStrip(QWidget):
             badge.setFixedWidth(40)
             layout.addWidget(badge)
 
-        self._link_label = self._add_text_label(layout)
-        self._perf_label = self._add_text_label(layout)
-        self._homing_label = self._add_text_label(layout)
-        self._counters_label = self._add_text_label(layout)
-        self._error_label = self._add_text_label(layout)
+        self._link_label = self._add_text_label(layout, "LINK OK 999ms CRC:999")
+        self._perf_label = self._add_text_label(layout, "FPS:99.9 INF:99.9ms")
+        self._homing_label = self._add_text_label(layout, "HOMED P:Y T:Y")
+        self._counters_label = self._add_text_label(layout, "AMMO:999 ATT:9/9 TRK:99")
+        self._error_label = self._add_text_label(layout, "")
 
         layout.addStretch(1)
         self._error_timer = QTimer(self)
         self._error_timer.setSingleShot(True)
         self._error_timer.timeout.connect(lambda: self._error_label.setText(""))
 
-    def _add_text_label(self, layout: QHBoxLayout) -> QLabel:
-        label = QLabel("")
+    def _add_text_label(self, layout: QHBoxLayout, width_reference: str) -> QLabel:
+        """``width_reference`` is never displayed -- it only sizes the
+        label's minimum width before any real text arrives. Without it,
+        an initially-empty QLabel's sizeHint is near zero, and the very
+        first update_from_snapshot() call after construction lands
+        before Qt has a chance to relayout for the real (much longer)
+        text -- a one-frame squished status strip at startup. A fixed
+        minimum width also stops later updates from jittering the
+        layout as text length varies tick to tick (e.g. "LINK OK ..." vs
+        the shorter "LINK LOST ...").
+        """
+        label = QLabel(width_reference)
         label.setStyleSheet(f"color: {theme.TEXT_DIM};")
+        label.setMinimumWidth(label.sizeHint().width())
+        label.setText("")
         layout.addWidget(label)
         return label
 
