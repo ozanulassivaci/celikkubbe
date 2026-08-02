@@ -42,6 +42,9 @@ htmlcov/
 *.jpeg
 *.bag
 
+# Documentation screenshots are the deliberate exception to *.png above.
+!docs/screenshots/*.png
+
 # Env / secrets
 .env
 .env.*
