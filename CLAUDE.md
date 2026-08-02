@@ -3,6 +3,14 @@
 Dense reference for picking this codebase back up. Not user documentation —
 assume familiarity with Python, control systems, and the code itself.
 
+## Status
+
+Layers built: `core/`, `vision/`, `tracking/`, `io/`, `geometry/`. All
+committed, tested, pushed. 414 tests passing, 97.55% coverage (gate is
+90% in `pyproject.toml`) across `core`/`vision`/`tracking`/`io`/`geometry`/
+`demos`. Next up: the GUI layer — out of scope for every module built so
+far by hard constraint (no Qt below it).
+
 ## Project overview
 
 TEKNOFEST air defence competition entry. A pan/tilt turret with a depth
@@ -18,14 +26,41 @@ the PC perceives and decides (which target, what angle); the STM32 moves
 decision assumes the PC never has a measured turret position — see
 "encoders are driver-side" below.
 
+## Protocol
+
+`docs/protocol.md` is signed off by the electronics team and is
+authoritative for the PC↔MCU wire format. Both firmware and `io/` are
+implemented from it; where code and the document disagree, the document
+wins — flag the divergence, don't silently resolve it in code's favour.
+
+**Corrected pin assignment** (differs from the original KiCad schematic):
+**PB4 is the E-STOP input**; **PA5 drives the airsoft trigger** — the two
+are swapped from the schematic's original assignment. Reason: PB4 is
+NJTRST on the STM32G431 and comes out of reset in JTAG mode with an
+internal pull-up already active, so wiring the trigger to it would
+energise the PC817 LED on every power-up, reset and firmware flash —
+unacceptable for a fire-control output that must default to no-fire. The
+same pull-up is exactly what an E-STOP input wants instead (NO contact
+pulls to GND, pull-up holds it high otherwise, no external resistor
+needed). Consequent hardware requirement: fit a 10kΩ pull-down from the
+PC817 LED anode to GND, so the trigger stays inactive even while the MCU
+pin is high-impedance (e.g. before firmware has configured it).
+
 ## Architecture
 
 ```
 core/       decision layer — state machines, gates, priority, health
 vision/     perception — frame sources, L2 colour detector
 tracking/   Kalman filtering, association, track lifecycle
+io/         PC<->MCU link — wire codec, simulated + real TurretLink, worker
+geometry/   pixel<->angle, parallax, ballistics, aim solving, calibration
 demos/      headless integration (no camera, no STM32, no GUI)
 ```
+
+Non-package top-level dirs: `docs/protocol.md` (the spec above),
+`config/` (calibration JSON, created on first save — empty and untracked
+until then), `tools/` (dev-environment verification scripts, not part of
+the installed package).
 
 Import direction inside `core/` is strictly one-way:
 
@@ -34,17 +69,24 @@ types -> commands -> protocols -> {config, clock, health, gates, priority, strin
                                 -> {cascade, modes, engagement}
 ```
 
-`vision/` and `tracking/` depend on `core/` (types, config, protocols,
-clock) but `core/` never imports from them. `demos/` sits on top of
-everything and is the only place all three layers plus a simulated
-`TurretLink` are wired together.
+`vision/`, `tracking/`, `io/` and `geometry/` all depend on `core/` but
+`core/` never imports from any of them. `geometry/` additionally depends
+on `vision/` (for `CameraIntrinsics`) — the only cross-dependency between
+sibling layers; `io/` does not depend on `vision/` or `geometry/`, nor
+they on it. `demos/` sits on top of everything and is the only place all
+layers plus a `TurretLink` (simulated or, via `--link sim`, the richer
+`SimTurretLink`) are wired together.
 
 **What each module owns:**
 
-- `core/types.py` — enums + dataclasses, zero internal deps.
-- `core/commands.py` — `Command` union (`SetMode`, `Goto`, `Jog`,
-  `SetVelocity`, `Home`, `Arm`, `Disarm`, `Fire`, `SoftEstop`, `SetParam`).
-  No `MotorEnable` — see hardware facts.
+- `core/types.py` — enums + dataclasses, zero internal deps. `McuMode`
+  lives here (not `io/codec.py`) since `core/` can't import `io/` but
+  `Telemetry.mcu_mode` needs the type.
+- `core/commands.py` — `Command` union: `SetMode`, `Goto`, `Jog`, `Stop`,
+  `Home`, `Zero`, `Arm`, `Disarm`, `Fire`, `SoftEstop`, `SetParam`. No
+  `MotorEnable` — see hardware facts. No `SetVelocity` — removed, see
+  io/ decisions. `Zero(axis, value_deg)` and `Stop()` were added after
+  the initial core/ build — see io/ decisions for why.
 - `core/protocols.py` — `Clock`, `FrameSource`, `TurretLink` interfaces.
 - `core/config.py` — every threshold. Nothing else may hardcode a number.
 - `core/clock.py` — `SystemClock`, `FakeClock`.
@@ -55,10 +97,11 @@ everything and is the only place all three layers plus a simulated
 - `core/priority.py` — `compute_risk_score`, `order_track_ids` (hysteresis),
   `filter_engageable` (permanent FRIENDLY exclusion).
 - `core/cascade.py` — L1/L2/L3 layer selection + recovery monitor.
-- `core/modes.py` — M1–M4 mode machine.
+- `core/modes.py` — M1–M4 mode machine. M2→M3 now additionally gated on
+  `Telemetry.homed_pan`/`homed_tilt` — see io/ decisions.
 - `core/engagement.py` — S1–S6 engagement machine, `StepResult`.
-- `core/strings.py` — Turkish UI strings keyed by `ReasonCode`. Nothing in
-  decision logic imports this.
+- `core/strings.py` — Turkish UI strings keyed by `ReasonCode` (now
+  including `NOT_HOMED`). Nothing in decision logic imports this.
 - `vision/sources.py` — `SyntheticSource`, `VideoFileSource`,
   `WebcamSource`. `RealSenseSource` does not exist yet (no camera in hand).
 - `vision/l2_color.py` — `ColorDetector`: the **permanent** L2 fallback,
@@ -69,9 +112,39 @@ everything and is the only place all three layers plus a simulated
   (`scipy.optimize.linear_sum_assignment`) + colour gating.
 - `tracking/manager.py` — `TrackManager`: owns track lifecycle,
   confirmation, class/IFF voting.
+- `io/codec.py` — `encode_command`/`encode_heartbeat` (PC→MCU JSON+CRC),
+  `FrameParser` (MCU→PC streaming binary decode), `TelemetryFrame`/
+  `AckFrame`/`EventFrame`/`LogFrame`, `AckResult`/`EventId`.
+- `io/sim_link.py` — `SimTurretLink`: real physics, not a stub. Fault
+  injection API (`inject_estop`, `inject_driver_alarm`,
+  `inject_link_dropout`, `inject_crc_errors`, `set_latency`).
+- `io/serial_link.py` — `SerialTurretLink`: real RS422 over `pyserial`,
+  auto-detects the Waveshare converter by USB VID/PID, reconnects with
+  backoff. Never exercised against real MCU firmware — no hardware yet.
+- `io/link_worker.py` — `LinkWorker`: owns a `TurretLink` in a background
+  thread, heartbeats, ACK/retransmit tracking, link-health staleness.
+  Not yet wired into `demos/pipeline.py` — see open questions.
+- `geometry/frames.py` — `TurretGeometry`, `rotation_matrix`,
+  `barrel_direction`, `muzzle_position`, `camera_to_turret`/
+  `turret_to_camera`. `DEFAULT_TURRET_GEOMETRY` is an unmeasured
+  placeholder.
+- `geometry/projection.py` — `pixel_to_ray`, `pixel_to_turret_point`,
+  `point_to_angles`, `crosshair_pixel`/`crosshair_with_indicator`.
+- `geometry/ballistics.py` — `BallisticTable` (slant-range-indexed),
+  `angular_velocity_dps` (undoes the Kalman filter's tan-nonlinearity),
+  `lead_angle`, `gravity_only_drop_deg`.
+- `geometry/solver.py` — `AimSolver.solve()`/`solve_all()`, `AimSolution`.
+- `geometry/calibration.py` — `BoresightCorrection`/`BoresightTable`,
+  JSON load/save for both calibrations, `refine_geometry()` (least
+  squares, real but never run against a physical rig).
 - `demos/pipeline.py` — `python -m celikkubbe.demos.pipeline --source
-  {synthetic,video,webcam}`. `SimulatedTurretLink`, `stub_aim_solutions`
-  (bearing-only, no lead compensation — real aim solving doesn't exist).
+  {synthetic,video,webcam} --link {stub,sim} --inject NAME[:VALUE]@TIMEs`.
+  `SimulatedTurretLink` is the lightweight `--link stub` default; `--link
+  sim` uses the real `io.sim_link.SimTurretLink` with no `LinkWorker` in
+  between (the demo loop calls `send_heartbeat()`/`poll()` itself). Aim
+  solving is the real `geometry.solver.AimSolver` — `stub_aim_solutions`
+  (bearing-only, no lead, no ballistics, no parallax) was removed once it
+  existed.
 
 L1/YOLO does not exist yet. `cls` is currently always `None` in the whole
 system (L2 is the only detector). `cascade.py`'s L1 health monitoring has
@@ -79,23 +152,37 @@ nothing real to watch yet.
 
 ## Hard constraints
 
-- No `PyQt6`/`PySide6` imports anywhere in `core/`.
-- No `pyserial`, `pyrealsense2`, `cv2` imports in `core/` — those belong to
-  `vision/`/I-O layers. `vision/` and `tracking/` *are* allowed `cv2`
-  and `numpy`.
+- No `PyQt6`/`PySide6` imports anywhere in `core/` or `io/`.
+  `io/link_worker.py`'s own docstring states this explicitly — telemetry,
+  events and command outcomes reach the owner through plain callbacks so
+  it stays usable headless.
+- No `pyserial`, `pyrealsense2`, `cv2` imports in `core/` — those belong
+  to `vision/`/I-O layers. `vision/` and `tracking/` *are* allowed `cv2`
+  and `numpy`; `io/serial_link.py` is allowed `pyserial`; `geometry/` is
+  allowed `numpy` and `scipy` (for `calibration.refine_geometry`'s
+  least-squares fit) but nothing hardware- or Qt-related.
 - State machines (`modes.step`, `engagement.step`, `cascade.Cascade`) never
   execute anything. They return `Command` objects or mutate nothing;
   an outer control loop executes commands and applies results via
   `dataclasses.replace()`.
 - Never call `time.monotonic()` directly. Every time-dependent class takes
-  a `Clock`; tests use `FakeClock`, never real sleeps.
+  a `Clock`; tests use `FakeClock`, never real sleeps. The one exception:
+  `io/link_worker.py`'s background thread loop has a single real
+  `time.sleep()` between ticks, but it's a pure CPU-yield that plays no
+  part in any timing *decision* — every threshold check inside `tick()`
+  compares against `clock.now()`, and tests call `tick()` directly
+  against a `FakeClock` without ever starting the real thread.
 - Python 3.10, `from __future__ import annotations`, full type hints,
   `frozen=True` dataclasses for anything crossing a thread boundary.
 - All code/identifiers/comments/docstrings in English. Turkish user-facing
   text lives only in `strings.py` as `REASON_CODE_TR`, keyed by
   `ReasonCode`, never inlined.
 - No magic numbers — every threshold in `config.py`, even ones added for
-  a single test.
+  a single test. (`io/`'s own link-timing constants —
+  `DEFAULT_ACK_TIMEOUT_MS`, reconnect backoff — and `geometry/`'s
+  `_BACKLASH_DEG`-style physical constants live as module-level constants
+  in their own files instead, since they're not `core/` decision
+  thresholds; still no bare literals inline.)
 
 ## Non-obvious decisions and why
 
@@ -137,6 +224,8 @@ selection logic and can silently diverge from `step()`'s own hysteresis
 state. So the outer layer solves for every confirmed track and hands over
 the whole map; `step()` looks up the one it picked. Missing entry for the
 selected track → `NO_AIM_SOLUTION`, stays in S4.
+`geometry.AimSolver.solve_all()` now produces exactly this map for real,
+not a stub.
 
 **Asymmetric colour-gated association.** `tracking/association.py`
 gates track/detection matching by colour, but not symmetrically:
@@ -170,6 +259,16 @@ failures on a *selected* S4 target aren't all the same kind of problem:
   regardless of current engagement state, so a track that recovers while
   a different target is selected is available next time S3 looks. All
   candidates excluded/deferred → S1, not spinning in S3.
+- A real consequence of `MAX_ENGAGEMENT_ATTEMPTS` (3) worth knowing: once
+  a track exhausts its attempts, it's permanently excluded from
+  `_pick_target` too (not just deferred), and if the same physical target
+  keeps re-confirming under the same `track_id` (e.g. a stationary
+  synthetic target), the engagement machine will cycle S1→S2→S3→S1
+  indefinitely without ever reaching S4 again. Seen directly in
+  `tests/demos/test_acceptance.py`'s full-loop test, which had to move
+  from a fixed-tick snapshot to a tick-until-condition loop once the real
+  `AimSolver` started converging fast enough to exhaust the 3 attempts
+  within what used to be a safe tick budget.
 
 **`UNKNOWN_CLASS_RANGE` — the Stage 3 silent-fail fix.** `RangeGate`
 fails closed on missing class, and L2 never produces a class. So the
@@ -222,7 +321,9 @@ engagement distance. Deliberately **not** gated on
 precision, a different concern) — confirmed necessary because
 `SyntheticSource` always reports `"estimated"` quality and must still
 exercise size-based ranging end to end. `range_source: Literal["depth",
-"size", "none"]` on both `Detection` and `Track` records which.
+"size", "none"]` on both `Detection` and `Track` records which. (This is
+`core.types.RangeSource`; `geometry.AimSolution.range_source` is a
+separate, wider Literal that adds `"assumed"` — see geometry/ decisions.)
 
 **L2 confidence is bounding-box fill ratio, not circularity.** Aircraft
 aren't circular; gating on circularity would reject legitimate detections
@@ -240,13 +341,178 @@ Keeps "never fire without passing every gate" true in exactly one place.
 **M4 SAFE has no automatic exit.** Deliberate safety decision. Only
 `operator_ack_fault=True` moves M4 → M1 for a fresh self-test.
 
+## io/ decisions and why
+
+**Asymmetric protocol, deliberately.** PC→MCU is newline-delimited JSON
+with a CRC16 trailer (`codec.encode_command`); MCU→PC is fixed binary
+(`codec.FrameParser`). JSON PC→MCU is low-rate (≤50Hz) and human-readable,
+so a serial terminal can drive the MCU directly during bring-up — worth
+a lot during integration week. Binary MCU→PC is 100Hz telemetry; JSON at
+that rate wouldn't fit the link's bandwidth budget as comfortably.
+
+**`FrameParser` is a streaming resync parser, not a line reader.** Frames
+split across reads reassemble; several frames in one read all parse; a
+corrupted frame resyncs one byte at a time to the next `0xAA 0x55` rather
+than discarding the whole buffer (a real `AA 55` inside payload data must
+not swallow the next genuine frame either); buffer growth is capped so a
+claimed frame that never completes — or a stream with no sync byte at
+all — can't grow it unbounded.
+
+**`send_tracked()`/`drain_acks()` exist on the concrete link classes, not
+on `TurretLink`.** `TurretLink.send(cmd) -> None` gives no way to learn
+which seq a command went out under, so `LinkWorker` can't correlate a
+later ACK against it. Both `SimTurretLink` and `SerialTurretLink` add
+`send_tracked(cmd, seq=None) -> int` (returns the seq used; passing one
+explicitly reuses it, for retransmission) and `drain_acks() ->
+list[(seq, AckResult)]` as duck-typed extras beyond the core `TurretLink`
+Protocol — `core/protocols.py` stays untouched. `LinkWorker` degrades to
+fire-and-forget `send()` against any link that doesn't provide these.
+
+**Duplicate seq is discarded, so a retransmitted `Fire` cannot
+double-fire.** docs/protocol.md section 3.1's stated behaviour.
+`LinkWorker` retransmits an unacknowledged command once under the *same*
+seq (not a fresh one) before giving up — if the original `Fire` actually
+landed but its ACK was merely lost, a fresh seq would make the MCU (or,
+in simulation, `SimTurretLink`) execute it twice. `SimTurretLink`
+implements the dedup itself (`_last_applied_seq`) so this is exercised in
+simulation, not just documented as a firmware responsibility.
+
+**`Telemetry.t` is the PC-side receive timestamp; `mcu_ms` is a separate,
+unsynchronised clock.** Same principle as `Clock`/`FakeClock` elsewhere —
+never trust or compare the MCU's own uptime counter against `now()`.
+`mcu_ms` lives on `codec.TelemetryFrame`, not `core.types.Telemetry`,
+since nothing in decision logic needs it.
+
+**`homed_pan`, `homed_tilt` and `mcu_mode` live on `core.types.Telemetry`
+itself, not `codec.TelemetryFrame`.** They are decision inputs, not
+diagnostics: `modes.py` refuses M2_STANDBY → M3_OPERATIONAL until both
+homing bits are set (docs/protocol.md section 5 — no limit switches
+exist, `zero` is the only homing mechanism), and `mcu_mode` exists for
+detecting PC/MCU mode disagreement (the enum and field exist; the actual
+disagreement check is not yet implemented — see open questions). `McuMode`
+lives in `core/types.py` too, not `io/codec.py`, since `core/` cannot
+import from `io/`. Every other wire-only field (`mcu_ms`, `ammo_fired`,
+`watchdog_tripped`, `limit_pan`/`limit_tilt`) stays on
+`codec.TelemetryFrame` as a diagnostic with no decision-logic consumer.
+`SimTurretLink` computes its own `mcu_mode` independently of what the PC
+last commanded via `SetMode` — reports `SAFE` immediately on
+estop/watchdog/driver-alarm regardless, the same independent-authority
+principle already applied to fire/aim rejection.
+
+**`SimTurretLink` is not a stub.** Real trapezoidal velocity profiles
+(closed-form, not incrementally integrated — exact under a `FakeClock`
+jump of any size, however large), pan backlash modelled as a slack
+dead-zone with the firmware's overshoot-and-return compensation
+(`BACKOFF_DEG` > the 0.1° gap guarantees the final leg always fully
+retakes the slack), gravity droop on the tilt axis when E-stop cuts
+power, and its own independent 200ms watchdog and fire/aim safety
+authority — a PC-side logic bug shows up in simulation exactly as it
+would against real firmware, rather than being silently absorbed by a
+lenient stub. Gotcha for anyone writing a test against it: it enforces
+its watchdog for real, so advancing a `FakeClock` by more than 200ms
+without calling `send_heartbeat()` trips it and freezes motion —
+several tests during development had to switch from a single big
+`clock.advance()` to a heartbeat-pumping loop for exactly this reason.
+
+**`SetVelocity` removed, `Stop` added.** `SetVelocity` had no wire
+equivalent (protocol only has single-axis `jog`, no simultaneous pan+tilt
+velocity command) and nothing in `core/` ever emitted it — a command
+that throws when called is a trap, so it was deleted rather than kept
+undocumented-broken. `Stop` (`{"cmd":"stop"}`) was added because manual
+jog needs a way to end motion when the operator releases a direction
+button; heartbeats alone never do that, they only keep the watchdog
+satisfied. `Command` is now `SetMode | Goto | Jog | Stop | Home | Zero |
+Arm | Disarm | Fire | SoftEstop | SetParam` — `Zero(axis, value_deg)` was
+also added (the actual homing mechanism; `Home` maps to the protocol's
+`home` command, reserved until limit switches exist).
+
+## geometry/ decisions and why
+
+**Conventions, fixed — see frames.py's module docstring for the full
+statement.** Camera frame: X right, Y **down**, Z forward (OpenCV
+convention). Turret frame: origin at the pan/tilt axis intersection, but
+— unlike a body-fixed barrel frame — does not rotate with pan/tilt; it's
+a fixed frame whose axes coincide with the camera's at pan=0, tilt=0
+(physically correct: the D435i is chassis-mounted, not turret-mounted,
+so the camera↔turret relationship is one fixed rigid transform,
+independent of the current pan/tilt). Azimuth positive right (viewed from
+above — the same right-handed sense as aeronautical yaw about a
+down-pointing axis: North→East is clockwise-positive from above).
+Elevation positive up. The Y-down-to-elevation-up sign inversion
+(`el = atan2(-y, hypot(x,z))`) is the single most likely place to
+introduce a sign error in this layer — called out in every docstring
+that touches it.
+
+**Crosshair moves RIGHT as pan increases.** Not a judgement call about
+"which way feels right" — forced by `point_to_angles`'s own
+`az = atan2(x, z)` plus the round-trip identity
+`point_to_angles(barrel_direction(pan, tilt)) == (pan, tilt)`, which the
+whole aim-solving pipeline depends on (if it didn't hold, commanding the
+solved angle would not point the barrel where the solver thought it
+would). An early prompt draft asserted the opposite ("moves left");
+resolved by deriving the direction from the stated azimuth convention and
+the existing `point_to_angles` formula rather than trusting either
+party's intuition, and confirmed by test.
+
+**`range_m` is Z-depth**, matching both the D435i's native depth
+convention and the size-based estimate — not straight-line distance from
+the camera. `projection.pixel_to_turret_point` scales the pixel ray so
+its Z component equals `range_m`, algebraically identical to the standard
+pinhole back-projection `X=(u-cx)*Z/fx, Y=(v-cy)*Z/fy, Z=Z`.
+
+**Ballistics uses slant range, not Z-depth.** `range_m` staying Z-depth
+is correct for placing the target's turret-frame point, but
+`ballistics.BallisticTable.time_of_flight()`/`interpolate_drop_deg()`
+need the actual muzzle-to-target distance the BB travels:
+`slant_range_m = |target_point - muzzle_position|` in turret frame
+(`frames.muzzle_position` accounts for `muzzle_offset_z_m`). The two
+values agree only on-axis and diverge as `1/cos(theta)` off-axis, and
+because the camera is chassis-fixed, targets are genuinely engaged well
+off-axis, not just near boresight: at 15m Z-depth and 34.5° off-axis
+(the edge of a 69° FOV), slant range is 18.2m, and confusing the two
+costs ~0.09° of drop error — nearly the entire 0.10° aim tolerance. Both
+values are on `AimSolution` (`range_m` and `slant_range_m`) so the
+distinction stays visible rather than implied.
+`ballistics.BallisticTable.ranges_m` is indexed by slant range throughout
+— live fire naturally produces it (you fire at a target and measure its
+actual distance). Boresight correction lookup is deliberately still on
+`range_m` (Z-depth), out of scope for the slant-range fix, which was
+specifically about ballistics.
+
+**`AimSolution` reports components separately**
+(`lead_az_deg`/`lead_el_deg`, `drop_deg`, `range_m`, `slant_range_m`,
+`confidence`, `warnings`) rather than just the final `az_deg`/`el_deg`.
+Lets a future GUI show the operator *why* the turret is pointing where it
+is, and keeps debugging a bad solve tractable instead of a black box.
+Pipeline (bbox centre → ray → point at range → angles → lead → drop →
+boresight → clamp) is additive — each correction summed independently,
+not re-derived from a corrected aim point — because every correction is
+sub-degree at these ranges, so the small-angle interactions between them
+are negligible.
+
+**A missing range yields a low-confidence solution, never `None`.**
+`AimSolver.solve()` returns `None` only for a track that isn't yet
+CONFIRMED. For any CONFIRMED track — even with no range at all — it
+substitutes `config.DEFAULT_RANGE_M` and marks confidence `"low"` rather
+than dropping the target: `engagement.step()` already treats a missing
+`solve_all()` entry as `NO_AIM_SOLUTION`, and silently dropping a target
+the operator can see on screen would be worse than a low-confidence
+solution they can evaluate. Confidence rules: `"high"` needs both
+depth-derived range and reliable (non-`"estimated"`) intrinsics —
+estimated-quality intrinsics downgrade even depth-derived range to
+`"low"`, not just size-derived, since the crosshair-placement imprecision
+that implies affects every range source equally; `"medium"` is
+size-derived range with reliable intrinsics; everything else is `"low"`.
+
 ## Confirmed hardware facts
 
 - MCU: **Nucleo-G431KB** (STM32G431).
 - Pan motor: **JK-HSD86** stepper, 5:1 gear reduction.
 - Tilt motor: **JK-HSD57** stepper, 2.5:1 belt reduction.
-- PC↔MCU link: **RS422** via **MAX490** transceiver.
-- Firing trigger: **PC817** optocoupler.
+- PC↔MCU link: **RS422** via **MAX490** transceiver, 921600 baud (see
+  Protocol section above for the corrected PB4/PA5 pin assignment).
+- Firing trigger: **PC817** optocoupler, driven from **PA5** (not PB4 —
+  see Protocol section), with a 10kΩ pull-down on the LED anode.
 - Motor driver **ENA inputs are not wired** — no software motor disable
   possible (`MotorEnable` command removed accordingly).
 - Encoders wire to the **stepper drivers**, not the MCU — see "encoders
@@ -267,17 +533,61 @@ Keeps "never fire without passing every gate" true in exactly one place.
   removing it wasn't asked for and nothing currently depends on it being
   gone).
 
+## Physical measurements still outstanding
+
+All marked `TODO(measurement)` in code — never silently guessed:
+
+- **Camera offset from the pan/tilt axis intersection**
+  (`geometry.frames.TurretGeometry`: `cam_offset_x/y/z_m`, plus mounting
+  `cam_roll/pitch/yaw_deg`, all currently 0 or a placeholder). Measurement
+  procedure is in `TurretGeometry`'s own docstring: turret at pan=0,
+  tilt=0, measure from the axis intersection to the camera's front
+  element on all three axes. `DEFAULT_TURRET_GEOMETRY`'s 0.20m Y offset
+  is chosen to reproduce this project's own worked parallax example
+  (~2.3° at 5m, ~0.76° at 15m), not a measurement — almost certainly not
+  the true geometry.
+- **Muzzle velocity** (`geometry.ballistics.DEFAULT_BALLISTIC_TABLE`,
+  currently 100 m/s) — needs a chronograph reading against the actual
+  HPA setup.
+- **Ballistic drop table** (`DEFAULT_BALLISTIC_TABLE.drop_deg` at 5/10/15m)
+  — currently `gravity_only_drop_deg()` predictions, no hop-up backspin
+  lift accounted for. Calibration procedure (fire at a stationary target
+  at each measured slant range, measure the vertical offset,
+  `atan(offset_m / slant_range_m)`) is in `ballistics.py`'s module
+  docstring.
+- **Boresight correction** (`geometry.calibration.BoresightCorrection`) —
+  no measurements exist yet; `config/boresight.json` doesn't exist, so
+  the system runs uncalibrated (`load_boresight()` returns an empty
+  `BoresightTable`, zero correction everywhere) rather than failing to
+  start.
+- **Muzzle offset from the rotation centre**
+  (`TurretGeometry.muzzle_offset_z_m`, currently 0.0) — affects slant
+  range, currently assumed negligible.
+
 ## Open questions / not yet built
 
+- GUI — the actual next layer. Out of scope for every module built so far
+  by hard constraint (no Qt in `core/` or `io/`); `geometry/`'s
+  `AimSolution` reporting components separately was built specifically so
+  a GUI can explain the pointing solution once it exists.
 - `RealSenseSource` — no camera in hand yet.
 - L1/YOLO detection layer — doesn't exist; `cls` is always `None`
   everywhere in the system today. `cascade.py`'s L1 health path is
   unexercised until this lands.
-- Ballistic lead-angle computation — `demos/pipeline.py` uses a
-  bearing-only placeholder (`stub_aim_solutions`) with no lead
-  compensation and no ballistics.
-- RS422 serial protocol encode/decode — not implemented.
-- GUI — out of scope for `core/` by hard constraint, not started.
+- `io.link_worker.LinkWorker` is built and unit-tested but not wired into
+  `demos/pipeline.py` — the demo talks to `SimTurretLink` directly
+  (`send_heartbeat()`/`poll()` from the demo loop itself), so
+  `LinkWorker`'s own ACK-retransmit and staleness logic is only exercised
+  by its own tests, not the integration demo.
+- `io.serial_link.SerialTurretLink` has never been exercised against real
+  MCU firmware — tests mock `pyserial.Serial` directly; no hardware yet.
+- `Telemetry.mcu_mode` is decoded/tracked (real MCU and `SimTurretLink`
+  both report it) but nothing yet uses it to detect PC/MCU mode
+  disagreement, which was the stated reason for promoting it onto
+  `Telemetry` in the first place.
+- `geometry.calibration.refine_geometry()` (camera-to-turret least
+  squares) is a real, working implementation, verified against synthetic
+  data only — never run against a physical rig.
 - `SetParam` wiring to push `ANGLE_TOLERANCE_DEG` (and similar) to the
   MCU's trajectory generator — constant exists, plumbing doesn't.
 - Empirical placeholders needing retuning against real (non-synthetic)
@@ -291,19 +601,33 @@ Keeps "never fire without passing every gate" true in exactly one place.
 ## Testing conventions
 
 - pytest, everything driven by `FakeClock` — no real sleeps, no wall-clock
-  flakiness.
-- Coverage gate: `fail_under = 90` in `pyproject.toml`; actual is ~97%
-  across `core`/`vision`/`tracking`/`demos`.
+  flakiness. Exception noted under Hard constraints
+  (`io/link_worker.py`'s background-thread idle sleep, never exercised by
+  a test that also checks timing).
+- Coverage gate: `fail_under = 90` in `pyproject.toml`; actual is 97.55%
+  (414 tests) across `core`/`vision`/`tracking`/`io`/`geometry`/`demos`.
 - ruff: line length 100, `target-version = "py310"`,
   `select = ["E", "F", "I", "UP", "B"]`. Run `ruff format` too — several
   past commits needed a follow-up formatting pass after edits shortened
   lines below the wrap threshold.
 - `tests/factories.py` — shared `make_track`/`make_telemetry`/`make_state`
   builders with sane defaults, not collected by pytest (no `test_`
-  prefix). Same pattern per-package: `tests/tracking/helpers.py`.
+  prefix). Same pattern per-package: `tests/tracking/helpers.py`. `io/`
+  and `geometry/` tests instead define small **local** per-file builders
+  (`test_solver.py`'s `_make_track`, `test_serial_link.py`'s
+  `_FakeSerial`/`_FakePortInfo`, `test_sim_link.py`'s heartbeat-pumping
+  `_run` helper) rather than a shared `helpers.py` — each file's needs
+  differed enough that sharing wasn't worth it.
 - Vision/tracking tests use `SyntheticSource` + NumPy-generated frames
   exclusively — nothing depends on a file that might not exist.
-  `VideoFileSource`/`WebcamSource` tests mock `cv2.VideoCapture` directly.
+  `VideoFileSource`/`WebcamSource` tests mock `cv2.VideoCapture` directly;
+  `test_serial_link.py`'s `_FakeSerial` mirrors the same
+  hand-written-fake-over-`MagicMock` pattern for `pyserial.Serial`.
+- `SimTurretLink` enforces its own 200ms watchdog for real — a test that
+  advances a `FakeClock` by more than that without calling
+  `send_heartbeat()` will trip it and freeze motion. Bit several tests
+  during development; the fix is always to pump heartbeats in the same
+  loop that advances the clock, not to disable the watchdog.
 - Conventional Commits, one logical change per commit, commit body
   explains *why* (root cause / trade-off), not what the diff already
   shows.
