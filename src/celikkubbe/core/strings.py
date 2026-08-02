@@ -12,7 +12,7 @@ place, even the ones with no ``ReasonCode`` to key off.
 
 from __future__ import annotations
 
-from celikkubbe.core.types import ReasonCode
+from celikkubbe.core.types import IFF, ReasonCode, TargetClass, TrackStatus
 
 REASON_CODE_TR: dict[ReasonCode, str] = {
     ReasonCode.NOT_OPERATIONAL: "Sistem operasyonel modda degil",
@@ -66,6 +66,20 @@ UI_LABEL_TR: dict[str, str] = {
     "OPERATOR_ACTIVE": "OPERATÖR AKTİF",
     "TRACKING_AID_ON": "TAKİP YARDIMI ON",
     "L1_UNAVAILABLE": "L1:YOK",
+    "AI_PANEL_TITLE": "YZ KARAR DESTEĞİ",
+    "LIVE_INDICATOR": "CANLI",
+    "THREAT_HIGH": "YÜKSEK TEHDİT",
+    "THREAT_MEDIUM": "ORTA",
+    "THREAT_LOW": "DÜŞÜK",
+    "THREAT_NONE": "HEDEF YOK",
+    "TARGET_LIST_TITLE": "HEDEF TAKİBİ",
+    "RECOMMENDATION_SEARCHING": "Hedef aranıyor…",
+    "RECOMMENDATION_TRACKING": "{cls} takip ediliyor",
+    "RECOMMENDATION_FIRE": "{cls} İMHA ET — Güven eşiği aşıldı",
+    "RECOMMENDATION_BLOCKED": "{cls} — {reason}",
+    "RECOMMENDATION_ENGAGED": "{cls} ateşlendi, sonuç bekleniyor",
+    "EXCLUDED_FRIENDLY": "DOST — otomatik hedef alınamaz",
+    "DEFERRED_PREFIX": "ERTELENDİ ({seconds:.0f}s) — {reason}",
 }
 
 # Self-test item detail templates -- dynamic (interpolated), so kept
@@ -92,4 +106,34 @@ SELF_TEST_ITEM_LABEL_TR: dict[str, str] = {
     "fire_lock": "Ateşleme Kilidi",
     "inference_time": "Çıkarım Süresi",
     "driver_alarms": "Sürücü Alarmları",
+}
+
+# IFF.UNKNOWN here is distinct from UI_LABEL_TR["UNKNOWN_CLASS"]: this one
+# is "friend/foe could not be determined", that one is "no TargetClass at
+# all" (which, with only L2 built, is every track, always -- see
+# vision/l2_color.py's own module docstring).
+IFF_LABEL_TR: dict[IFF, str] = {
+    IFF.HOSTILE: "DÜŞMAN",
+    IFF.FRIENDLY: "DOST",
+    IFF.UNKNOWN: "BİLİNMEYEN",
+}
+
+TRACK_STATUS_TR: dict[TrackStatus, str] = {
+    TrackStatus.TENTATIVE: "BEKLEMEDE",
+    TrackStatus.CONFIRMED: "ONAYLANDI",
+    TrackStatus.COASTING: "TAHMİNİ",
+    TrackStatus.LOST: "KAYBOLDU",
+}
+
+# cls is always None today -- L2 never sets it (see vision/l2_color.py) --
+# so this is currently unreachable in practice, kept for when an L1/YOLO
+# layer lands rather than leaving a raw English enum value on screen the
+# day it does.
+TARGET_CLASS_TR: dict[TargetClass, str] = {
+    TargetClass.F16: "F-16",
+    TargetClass.HELICOPTER: "HELİKOPTER",
+    TargetClass.MISSILE: "FÜZE",
+    TargetClass.UAV: "İHA",
+    TargetClass.BALLOON: "BALON",
+    TargetClass.UNKNOWN: "BİLİNMEYEN",
 }

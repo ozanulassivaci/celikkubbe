@@ -331,6 +331,7 @@ class PipelineWorker(QThread):
             tracks=tuple(scored),
             last_self_test=self._last_self_test_display,
         )
+        engagement_fallback_reason: ReasonCode | None = None
         if next_mode is Mode.M1_INIT:
             # Self-test is still running: never let engagement's own aim
             # commands compete with the self-test's own pan/tilt
@@ -361,6 +362,7 @@ class PipelineWorker(QThread):
                 commanded_tilt_deg=engagement_result.commanded_tilt_deg,
                 telemetry=telemetry,
             )
+            engagement_fallback_reason = engagement_result.fallback_reason
         step_ms = (self._clock.now() - step_start) * 1000.0
 
         crosshair_px, crosshair_offscreen, crosshair_bearing_deg = self._solve_crosshair(
@@ -419,6 +421,7 @@ class PipelineWorker(QThread):
             fault_reason=self._derive_fault_reason(telemetry),
             event_log=event_log,
             ammo_fired=ammo_fired,
+            engagement_fallback_reason=engagement_fallback_reason,
         )
         with self._snapshot_lock:
             self._latest_snapshot = snapshot

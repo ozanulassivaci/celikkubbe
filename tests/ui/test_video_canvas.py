@@ -107,6 +107,7 @@ def _snapshot(
         fault_reason=None,
         event_log=(),
         ammo_fired=None,
+        engagement_fallback_reason=None,
     )
 
 

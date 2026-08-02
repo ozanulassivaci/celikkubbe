@@ -124,6 +124,22 @@ def test_safe_overlay_shows_in_m4_and_requires_acknowledgement(qtbot):
     assert window._safe_overlay.isHidden()
 
 
+def test_left_panel_track_selection_sets_manual_target_id(qtbot):
+    clock = FakeClock()
+    window, worker, _link = _make_window(clock)
+    qtbot.addWidget(window)
+
+    _settle_self_test(worker, clock)
+    _tick(worker, clock)
+
+    assert window._latest_snapshot.tracks, "synthetic source should have produced a track by now"
+    track_id = window._latest_snapshot.tracks[0].track_id
+
+    window._left_panel.track_selected.emit(track_id)
+
+    assert window._operator_input.manual_target_id == track_id
+
+
 def test_link_loss_visible_in_status_strip_within_stale_threshold(qtbot):
     clock = FakeClock()
     window, worker, link = _make_window(clock)

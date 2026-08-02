@@ -1,9 +1,9 @@
 """MainWindow: the application shell.
 
-Title bar, three-column splitter (left panel / VideoCanvas / right
-panel), the status strip, and the two full-window overlays -- wired to a
-PipelineWorker this window owns. Left/right panels are placeholders here;
-they are populated in the next prompt. Nothing in this module reads a
+Title bar, three-column splitter (LeftPanel / VideoCanvas / right panel),
+the status strip, and the two full-window overlays -- wired to a
+PipelineWorker this window owns. The right panel is still a placeholder;
+it is populated in the next prompt. Nothing in this module reads a
 camera, a serial port, or runs inference -- the GUI thread only ever
 paints and reacts to signals emitted from PipelineWorker's own thread.
 """
@@ -28,6 +28,7 @@ from celikkubbe.core import config
 from celikkubbe.core.strings import UI_LABEL_TR
 from celikkubbe.core.types import EngagementState, Layer, Mode, OperatorInput, Track
 from celikkubbe.ui import theme
+from celikkubbe.ui.left_panel import LeftPanel
 from celikkubbe.ui.overlays.safe import SafeOverlay
 from celikkubbe.ui.overlays.selftest import SelfTestOverlay
 from celikkubbe.ui.pipeline_worker import PipelineWorker
@@ -259,13 +260,13 @@ class MainWindow(QMainWindow):
         outer.addWidget(_build_title_bar())
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
-        left_panel = _build_placeholder_panel("AI DECISION SUPPORT")
-        left_panel.setMinimumWidth(220)
+        self._left_panel = LeftPanel()
+        self._left_panel.setMinimumWidth(220)
         self._canvas = VideoCanvas()
         self._canvas.set_source_label(source_label)
         right_panel = _build_placeholder_panel("ENGAGEMENT CONTROL")
         right_panel.setMinimumWidth(220)
-        splitter.addWidget(left_panel)
+        splitter.addWidget(self._left_panel)
         splitter.addWidget(self._canvas)
         splitter.addWidget(right_panel)
         splitter.setSizes([320, 900, 330])
@@ -286,6 +287,7 @@ class MainWindow(QMainWindow):
         self._safe_overlay.hide()
 
         self._canvas.clicked_normalized.connect(self._on_canvas_clicked)
+        self._left_panel.track_selected.connect(self._select_track)
         self._worker.snapshot_ready.connect(self._on_snapshot)
         self._worker.error.connect(self._on_error)
 
@@ -314,6 +316,7 @@ class MainWindow(QMainWindow):
         self._latest_snapshot = snapshot
         self._canvas.set_snapshot(snapshot)
         self._status_strip.update_from_snapshot(snapshot)
+        self._left_panel.update_from_snapshot(snapshot)
         self._update_overlays(snapshot)
 
     def _update_overlays(self, snapshot: UiSnapshot) -> None:
@@ -356,9 +359,10 @@ class MainWindow(QMainWindow):
         track = self._find_track_at(x_norm, y_norm)
         if track is None:
             return
-        self._operator_input = dataclasses.replace(
-            self._operator_input, manual_target_id=track.track_id
-        )
+        self._select_track(track.track_id)
+
+    def _select_track(self, track_id: int) -> None:
+        self._operator_input = dataclasses.replace(self._operator_input, manual_target_id=track_id)
         self._worker.set_operator_input(self._operator_input)
 
     def _find_track_at(self, x_norm: float, y_norm: float) -> Track | None:

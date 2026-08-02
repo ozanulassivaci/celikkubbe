@@ -129,3 +129,12 @@ class UiSnapshot:
     # the wire protocol). None when the link does not report it, rather
     # than a misleading 0.
     ammo_fired: int | None
+    # engagement.step()'s own StepResult.fallback_reason for this tick --
+    # which gate is currently blocking the selected track in S4_AIM, if
+    # any. engagement.py itself only threads engagement/selected_track_id/
+    # attempts/deferred/gate_fail_since/commanded_pan_deg/tilt_deg into
+    # SystemState (see PipelineWorker._tick_inner); fallback_reason has
+    # nowhere else to go, and the left panel's AI recommendation is the
+    # one place a competition judge should see *why* the system is not
+    # firing, in the operator's own language via strings.describe().
+    engagement_fallback_reason: ReasonCode | None
