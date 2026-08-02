@@ -7,6 +7,17 @@ each is small enough (aim tolerance 0.10 deg; lead and drop are each
 sub-degree at these ranges) that the small-angle interactions between
 them are negligible, and keeping them additive is what lets
 AimSolution report them as separate, inspectable components.
+
+Two distinct "range" values, both on AimSolution: ``range_m`` is Z-depth
+(projection.pixel_to_turret_point's input convention -- see its
+docstring), used to place the target's turret-frame point.
+``slant_range_m`` is the actual muzzle-to-target distance -- what the BB
+travels -- used for everything ballistic (time of flight, drop lookup).
+They agree only on-axis; off-axis they diverge as 1/cos(theta), and
+because the camera is chassis-fixed, targets are genuinely engaged well
+off-axis, not just near boresight. At 15 m Z-depth and 34.5 deg off-axis
+(the edge of a 69 deg FOV), slant range is 18.2 m, not 15 m -- confusing
+the two here would burn most of the 0.10 deg aim tolerance on drop alone.
 """
 
 from __future__ import annotations
@@ -14,11 +25,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
+import numpy as np
+
 from celikkubbe.core import config
 from celikkubbe.core.types import Track, TrackStatus
 from celikkubbe.geometry.ballistics import BallisticTable, angular_velocity_dps, lead_angle
 from celikkubbe.geometry.calibration import BoresightTable
-from celikkubbe.geometry.frames import TurretGeometry
+from celikkubbe.geometry.frames import TurretGeometry, muzzle_position
 from celikkubbe.geometry.projection import pixel_to_turret_point, point_to_angles
 from celikkubbe.vision.sources import CameraIntrinsics
 
@@ -31,6 +44,7 @@ class AimSolution:
     az_deg: float
     el_deg: float
     range_m: float
+    slant_range_m: float
     range_source: AimRangeSource
     lead_az_deg: float
     lead_el_deg: float
@@ -82,13 +96,25 @@ class AimSolver:
         p_turret = pixel_to_turret_point(u_center, v_center, range_m, intr, self._geom)
         base_az_deg, base_el_deg = point_to_angles(p_turret)
 
+        # Ballistics needs the actual distance the BB travels -- the norm
+        # of the muzzle-to-target vector -- not range_m's Z-depth. They
+        # agree on-axis but diverge fast off-axis (1/cos(theta)), and the
+        # camera being chassis-fixed means targets are genuinely engaged
+        # near the frame edge, not just close to boresight. base_az/el
+        # (pre lead/drop/boresight) are accurate enough to place the
+        # muzzle for this -- see frames.muzzle_position.
+        muzzle_pos = muzzle_position(base_az_deg, base_el_deg, self._geom)
+        slant_range_m = float(np.linalg.norm(p_turret - muzzle_pos))
+
         ang_vel_dps = angular_velocity_dps((u_center, v_center), track.velocity, intr)
-        time_of_flight_s = self._ballistics.time_of_flight(range_m)
+        time_of_flight_s = self._ballistics.time_of_flight(slant_range_m)
         lead_az_deg, lead_el_deg = lead_angle(ang_vel_dps, time_of_flight_s)
 
-        drop_deg, drop_clamped = self._ballistics.interpolate_drop_deg(range_m)
+        drop_deg, drop_clamped = self._ballistics.interpolate_drop_deg(slant_range_m)
         if drop_clamped:
-            warnings.append(f"ballistic table extrapolated beyond its measured span at {range_m}m")
+            warnings.append(
+                f"ballistic table extrapolated beyond its measured span at {slant_range_m:.2f}m"
+            )
 
         boresight_az_deg, boresight_el_deg = self._boresight.correction_at(range_m)
 
@@ -110,6 +136,7 @@ class AimSolver:
             az_deg=clamped_az,
             el_deg=clamped_el,
             range_m=range_m,
+            slant_range_m=slant_range_m,
             range_source=range_source,
             lead_az_deg=lead_az_deg,
             lead_el_deg=lead_el_deg,

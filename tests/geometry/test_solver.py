@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 import pytest
 
 from celikkubbe.core import config
@@ -23,6 +25,18 @@ _RELIABLE_INTR = CameraIntrinsics(
 
 def _principal_point_norm(intr: CameraIntrinsics = _INTR) -> tuple[float, float]:
     return intr.cx / intr.width, intr.cy / intr.height
+
+
+def _bbox_at_azimuth_deg(
+    az_deg: float, intr: CameraIntrinsics = _INTR
+) -> tuple[float, float, float, float]:
+    """A small bbox centred on the pixel whose ray makes exactly az_deg
+    with the optical axis (elevation held at the principal point).
+    """
+    u_px = intr.cx + intr.fx * math.tan(math.radians(az_deg))
+    v_px = intr.cy
+    u_norm, v_norm = u_px / intr.width, v_px / intr.height
+    return u_norm - 0.005, v_norm - 0.005, u_norm + 0.005, v_norm + 0.005
 
 
 def _make_track(
@@ -145,6 +159,72 @@ def test_ballistic_extrapolation_warns() -> None:
 
     assert solution is not None
     assert any("extrapolated" in w for w in solution.warnings)
+
+
+# --- slant range vs Z-depth ---
+
+
+def test_on_axis_slant_range_equals_z_depth() -> None:
+    solver = AimSolver(_ZERO_GEOM, _ZERO_BALLISTICS)
+    cu, cv = _principal_point_norm()
+    track = _make_track(bbox=(cu - 0.005, cv - 0.005, cu + 0.005, cv + 0.005), range_m=15.0)
+
+    solution = solver.solve(track, _INTR)
+
+    assert solution is not None
+    assert solution.range_m == 15.0
+    assert solution.slant_range_m == pytest.approx(15.0, abs=1e-6)
+
+
+def test_30_degrees_off_axis_slant_range_at_15m_z_depth() -> None:
+    solver = AimSolver(_ZERO_GEOM, _ZERO_BALLISTICS)
+    track = _make_track(bbox=_bbox_at_azimuth_deg(30.0), range_m=15.0)
+
+    solution = solver.solve(track, _INTR)
+
+    assert solution is not None
+    assert solution.range_m == 15.0
+    assert solution.slant_range_m == pytest.approx(17.32, abs=0.01)
+
+
+def test_off_axis_drop_correction_exceeds_on_axis_at_same_z_depth() -> None:
+    ballistics = BallisticTable(ranges_m=(5.0, 20.0), drop_deg=(0.1, 0.6), muzzle_velocity_ms=100.0)
+    solver = AimSolver(_ZERO_GEOM, ballistics)
+
+    cu, cv = _principal_point_norm()
+    on_axis = _make_track(
+        track_id=1, bbox=(cu - 0.005, cv - 0.005, cu + 0.005, cv + 0.005), range_m=15.0
+    )
+    off_axis = _make_track(track_id=2, bbox=_bbox_at_azimuth_deg(30.0), range_m=15.0)
+
+    on_axis_solution = solver.solve(on_axis, _INTR)
+    off_axis_solution = solver.solve(off_axis, _INTR)
+
+    assert on_axis_solution is not None
+    assert off_axis_solution is not None
+    assert on_axis_solution.range_m == off_axis_solution.range_m == 15.0
+    assert off_axis_solution.slant_range_m > on_axis_solution.slant_range_m
+    assert off_axis_solution.drop_deg > on_axis_solution.drop_deg
+
+
+def test_muzzle_offset_shifts_slant_range_closer_to_an_on_axis_target() -> None:
+    cu, cv = _principal_point_norm()
+    bbox = (cu - 0.005, cv - 0.005, cu + 0.005, cv + 0.005)
+    track = _make_track(bbox=bbox, range_m=15.0)
+
+    geom_no_muzzle = TurretGeometry(0.0, 0.0, 0.0, muzzle_offset_z_m=0.0)
+    geom_with_muzzle = TurretGeometry(0.0, 0.0, 0.0, muzzle_offset_z_m=0.3)
+
+    solution_no_muzzle = AimSolver(geom_no_muzzle, _ZERO_BALLISTICS).solve(track, _INTR)
+    solution_with_muzzle = AimSolver(geom_with_muzzle, _ZERO_BALLISTICS).solve(track, _INTR)
+
+    assert solution_no_muzzle is not None
+    assert solution_with_muzzle is not None
+    # On-axis, a muzzle 0.3m forward of the rotation centre is 0.3m closer
+    # to the target -- slant range shrinks by exactly that much.
+    assert solution_with_muzzle.slant_range_m == pytest.approx(
+        solution_no_muzzle.slant_range_m - 0.3
+    )
 
 
 def test_solve_all_returns_one_entry_per_confirmed_track() -> None:

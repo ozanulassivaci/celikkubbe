@@ -1,10 +1,20 @@
 """Time of flight, empirical drop correction, and lead angle.
 
+Every "range" in this module is **slant range**: the straight-line
+muzzle-to-target distance the BB actually travels, not the Z-depth
+convention projection.pixel_to_turret_point uses. Live fire naturally
+produces slant range -- you fire at a target and measure its actual
+distance -- so BallisticTable.ranges_m is indexed by it, and callers
+(geometry.solver.AimSolver) are responsible for converting from Z-depth
+before calling time_of_flight()/interpolate_drop_deg(). The two agree
+on-axis and diverge as 1/cos(theta) off-axis; see solver.py's module
+docstring for why that divergence matters at this tolerance.
+
 Calibration procedure for BallisticTable.drop_deg (live fire, one entry
-per range): fire at a stationary target at each range, measure the
-vertical offset of the impact point from the aim point, convert to
-degrees with ``atan(offset_m / range_m)``, and record the result here
-replacing the gravity-only placeholder.
+per range): fire at a stationary target at each measured slant range,
+measure the vertical offset of the impact point from the aim point,
+convert to degrees with ``atan(offset_m / slant_range_m)``, and record
+the result here replacing the gravity-only placeholder.
 
 Degrees at every function boundary, matching frames.py/projection.py.
 """
@@ -19,9 +29,9 @@ from celikkubbe.vision.sources import CameraIntrinsics
 GRAVITY_MS2 = 9.81
 
 
-def gravity_only_drop_deg(range_m: float, muzzle_velocity_ms: float) -> float:
-    """Unassisted projectile drop angle at range_m -- gravity only, no
-    hop-up backspin lift.
+def gravity_only_drop_deg(slant_range_m: float, muzzle_velocity_ms: float) -> float:
+    """Unassisted projectile drop angle at slant_range_m -- gravity only,
+    no hop-up backspin lift.
 
     For comparison against a live-fire-measured BallisticTable, not a
     substitute for one: hop-up lift partially offsets gravity by an
@@ -29,16 +39,16 @@ def gravity_only_drop_deg(range_m: float, muzzle_velocity_ms: float) -> float:
     aim tolerance (see the module docstring's calibration procedure).
     Real measured drop should come in below this prediction.
     """
-    if range_m <= 0.0 or muzzle_velocity_ms <= 0.0:
+    if slant_range_m <= 0.0 or muzzle_velocity_ms <= 0.0:
         return 0.0
-    t = range_m / muzzle_velocity_ms
+    t = slant_range_m / muzzle_velocity_ms
     drop_m = 0.5 * GRAVITY_MS2 * t * t
-    return math.degrees(math.atan(drop_m / range_m))
+    return math.degrees(math.atan(drop_m / slant_range_m))
 
 
 @dataclass(frozen=True)
 class BallisticTable:
-    """Empirical drop correction, indexed by range.
+    """Empirical drop correction, indexed by slant range.
 
     Values must come from live fire. Hop-up backspin generates lift that
     partially offsets gravity, so no closed-form model predicts real
@@ -46,41 +56,42 @@ class BallisticTable:
 
     ranges_m must be strictly ascending; drop_deg is the corresponding
     positive-is-downward correction (degrees to add, pointing the barrel
-    up, to compensate for drop) at each range.
+    up, to compensate for drop) at each range. Both are slant range --
+    see the module docstring.
     """
 
     ranges_m: tuple[float, ...]
     drop_deg: tuple[float, ...]
     muzzle_velocity_ms: float
 
-    def time_of_flight(self, range_m: float) -> float:
-        """range_m / muzzle_velocity_ms.
+    def time_of_flight(self, slant_range_m: float) -> float:
+        """slant_range_m / muzzle_velocity_ms.
 
         TODO(measurement): add a drag term once live-fire measurements
         exist to characterise it; this is a muzzle-velocity-only estimate.
         """
         if self.muzzle_velocity_ms <= 0.0:
             return 0.0
-        return range_m / self.muzzle_velocity_ms
+        return slant_range_m / self.muzzle_velocity_ms
 
-    def interpolate_drop_deg(self, range_m: float) -> tuple[float, bool]:
+    def interpolate_drop_deg(self, slant_range_m: float) -> tuple[float, bool]:
         """Linear interpolation between measured entries.
 
         Returns (drop_deg, clamped). Clamped to the nearest endpoint's
-        value when range_m falls outside the measured span, with
+        value when slant_range_m falls outside the measured span, with
         clamped=True so the caller can warn that the table is being
         extrapolated rather than interpolated.
         """
         ranges = self.ranges_m
         drops = self.drop_deg
-        if range_m <= ranges[0]:
-            return drops[0], range_m < ranges[0]
-        if range_m >= ranges[-1]:
-            return drops[-1], range_m > ranges[-1]
+        if slant_range_m <= ranges[0]:
+            return drops[0], slant_range_m < ranges[0]
+        if slant_range_m >= ranges[-1]:
+            return drops[-1], slant_range_m > ranges[-1]
         for i in range(len(ranges) - 1):
             r0, r1 = ranges[i], ranges[i + 1]
-            if r0 <= range_m <= r1:
-                t = (range_m - r0) / (r1 - r0)
+            if r0 <= slant_range_m <= r1:
+                t = (slant_range_m - r0) / (r1 - r0)
                 return drops[i] + t * (drops[i + 1] - drops[i]), False
         return drops[-1], False  # pragma: no cover — the two clamp checks above are exhaustive
 

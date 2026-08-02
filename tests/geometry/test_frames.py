@@ -8,6 +8,7 @@ from celikkubbe.geometry.frames import (
     TurretGeometry,
     barrel_direction,
     camera_to_turret,
+    muzzle_position,
     rotation_matrix,
     turret_to_camera,
 )
@@ -78,3 +79,20 @@ def test_default_turret_geometry_has_the_documented_lateral_offset() -> None:
     assert DEFAULT_TURRET_GEOMETRY.cam_offset_y_m == pytest.approx(0.20)
     assert DEFAULT_TURRET_GEOMETRY.cam_offset_x_m == 0.0
     assert DEFAULT_TURRET_GEOMETRY.cam_offset_z_m == 0.0
+
+
+def test_muzzle_position_is_zero_offset_forward_at_zero_pan_tilt() -> None:
+    geom = TurretGeometry(0.0, 0.0, 0.0, muzzle_offset_z_m=0.3)
+    assert np.allclose(muzzle_position(0.0, 0.0, geom), [0.0, 0.0, 0.3])
+
+
+def test_muzzle_position_with_no_offset_is_the_rotation_centre() -> None:
+    geom = TurretGeometry(0.0, 0.0, 0.0, muzzle_offset_z_m=0.0)
+    assert np.allclose(muzzle_position(20.0, 10.0, geom), [0.0, 0.0, 0.0])
+
+
+def test_muzzle_position_follows_the_barrel_direction() -> None:
+    geom = TurretGeometry(0.0, 0.0, 0.0, muzzle_offset_z_m=0.5)
+    pos = muzzle_position(90.0, 0.0, geom)
+    assert np.allclose(pos, 0.5 * barrel_direction(90.0, 0.0))
+    assert np.allclose(pos, [0.5, 0.0, 0.0])

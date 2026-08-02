@@ -122,6 +122,17 @@ def barrel_direction(pan_deg: float, tilt_deg: float) -> np.ndarray:
     return rotation_matrix(pan_deg, tilt_deg) @ np.array([0.0, 0.0, 1.0])
 
 
+def muzzle_position(pan_deg: float, tilt_deg: float, geom: TurretGeometry) -> np.ndarray:
+    """Muzzle tip position in turret frame: ``muzzle_offset_z_m`` forward
+    of the rotation centre along the current barrel direction.
+
+    Used to get the true muzzle-to-target distance (slant range) for
+    ballistics, rather than the rotation-centre-to-target distance --
+    see ballistics.py's module docstring.
+    """
+    return barrel_direction(pan_deg, tilt_deg) * geom.muzzle_offset_z_m
+
+
 def _mount_rotation(geom: TurretGeometry) -> np.ndarray:
     """Fixed camera-mounting rotation: yaw about turret Y (matching pan),
     pitch about turret X (matching tilt), roll about the camera's own
