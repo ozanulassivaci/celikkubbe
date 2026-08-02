@@ -65,12 +65,26 @@ demos/      headless integration (no camera, no STM32, no GUI)
 
 Non-package top-level dirs: `docs/protocol.md` (the spec above),
 `docs/screenshots/` (GUI reference screenshots, the one deliberate
-exception to the `*.png` gitignore rule), `config/` (calibration JSON
-and HSV tuning presets, created on first save — empty and untracked
-until then; the whole `config/` directory is gitignored), `assets/fonts/`
-(bundled monospace font for `ui/theme.py`'s `load_monospace_font()` —
-empty today, see open questions), `tools/` (dev-environment verification
-scripts, not part of the installed package).
+exception to the `*.png` gitignore rule — see below for what each one
+shows), `config/` (calibration JSON and HSV tuning presets, created on
+first save — empty and untracked until then; the whole `config/`
+directory is gitignored), `assets/fonts/` (bundled monospace font for
+`ui/theme.py`'s `load_monospace_font()` — empty today, see open
+questions), `tools/` (dev-environment verification scripts, not part of
+the installed package).
+
+`docs/screenshots/` contents, in order captured: `01_startup_selftest`
+(M1, self-test mid-run, stm32_link still failing) through
+`06_crosshair_offscreen` (a parked, off-boresight crosshair with its
+direction arrow) are the shell/canvas set, captured **before** Part 0's
+UI-polish pass — they still show the English chrome (`SELF-TEST`,
+`ACKNOWLEDGE`) and layout bugs (oversized event log, duplicated mode
+text) that have since been fixed, so do not treat them as current UI
+reference, only as shell/canvas-layer history. `07_populated_panels`,
+`08_tuning_window`, `09_stage1_manual_control` are current: the left
+and right panels both populated with a real mixed hostile/friendly
+scene, the HSV tuning window's live source preview, and Stage 1's manual
+control pad with its three mode cards.
 
 Import direction inside `core/` is strictly one-way:
 
@@ -660,6 +674,39 @@ Stage 1 with L3 (Tam Manuel, a Stage 1-only override) still selected
 falls back to L2 there rather than leaving that combination sitting in
 `SystemState`.
 
+**Two different cross-thread synchronisation strategies, chosen by
+mutation pattern, not by habit.** `OperatorInputBuilder` takes a real
+`threading.Lock` around two small dicts, because both the gamepad
+thread and the GUI thread call its `set_fire`/`set_arm` **incrementally**
+and concurrently — a lock is cheap here and there is no single-object
+swap that would make sense for "OR every source's own flag together."
+`ColorDetectorConfig` deliberately does the opposite: no lock at all,
+because `PipelineWorker.detector` docstring's contract is "replace the
+whole object, never mutate a field" — a single reference reassignment
+is already atomic under the GIL, and adding a lock there would protect
+against a mutation pattern (field-by-field editing) the API contract
+already forbids. Picking the wrong one of these two for a given piece
+of shared state is the actual risk, not omitting synchronisation
+entirely.
+
+**`GamepadWorker` is constructed and started outside `MainWindow`, not
+inside it — dependency injection, same reasoning as `PipelineWorker`
+itself.** `MainWindow.__init__` takes `gamepad: GamepadWorker | None =
+None` and only wires signal handlers; `ui/app.py`'s `build()` is what
+constructs the real one and calls `.start()`, exactly like it already
+does for `worker.start()`. Tests that only need `MainWindow`'s own
+logic construct it with no gamepad at all and never spin up a real
+background thread; `closeEvent` still stops/joins one if given, for
+symmetry with `PipelineWorker`'s own shutdown path. `GamepadWorker.
+jog_axis_changed` emits one *signed* `speed_dps` per axis (sign encodes
+direction, since a 2D stick can move both axes independently and there
+is no per-axis `Stop`), whereas `RightPanel.jog_pressed` emits a
+separate unsigned `speed_dps` plus a `direction: int` (matching
+`core.commands.Jog`'s own field shape exactly). `MainWindow.
+_on_gamepad_jog_axis_changed` is the one place that converts between
+the two shapes before calling `PipelineWorker.request_jog` — deliberate,
+so neither signal has to pretend to be the other's shape.
+
 **Click-to-aim on empty canvas builds a synthetic `Track`, not a raw
 bearing.** Stage 1, clicking where nothing is detected, still goes
 through `PipelineWorker.aim_solver.solve()` — the same solver every real
@@ -680,21 +727,47 @@ against fresh snapshots, at 10Hz, and only while `self.isVisible()` —
 closing or hiding it stops the extra work with no separate teardown
 needed.
 
-**Visual QA caught real bugs no test could, repeatedly — treat it as
-load-bearing, not optional.** Concretely, this build: `REASON_CODE_TR`
-was ASCII-transliterated throughout (`degil` for `değil`, etc.) since
-before the GUI existed — nothing had ever displayed it prominently
-enough to notice. The lock banner and the telemetry strip's own
-OPERATOR AKTİF/TAKİP YARDIMI ON row were positioned from two independent
-magic-number offsets and visibly overlapped once a real scene exercised
-both at once. `QGroupBox`/`QScrollArea`/`QComboBox`/`QLineEdit`/
-`QCheckBox` had no rules in `theme.py`'s shared stylesheet at all, since
-nothing before the tuning window ever used them — left unstyled, it was
-light-text-on-light-background, nearly unreadable. A `QLabel` showing a
-long fire-blocked reason centre-clipped illegibly from both ends instead
-of eliding. None of these are the kind of thing a passing test suite
-reveals; all four were found by rendering the real window (usually
-offscreen, via `QT_QPA_PLATFORM=offscreen`) and looking at the result.
+**Visual QA is a required step before declaring any GUI work done, not
+an optional nice-to-have.** A passing test suite has never once been
+enough on its own — across two separate rounds of actually launching
+the app (usually offscreen, via `QT_QPA_PLATFORM=offscreen`) and reading
+back real rendered frames, this caught bugs no test caught, because no
+test rendered a real frame at real widget geometry in the first place:
+- Round 1 (shell/canvas, before `left_panel.py`/`right_panel.py`
+  existed): `StatusStrip`'s text labels started at `""` and only
+  reached real width on the *second* `update_from_snapshot()`, visibly
+  squishing the strip for one frame at startup; `VideoCanvas`'s
+  crosshair inherited a stale `QBrush` left set by `_draw_label_near`
+  and painted as a filled disc instead of an outline, hiding whatever
+  track was underneath; `SafeOverlay`'s event log used
+  `QPlainTextEdit`'s default (white) palette against the rest of the
+  dark shell; the off-screen crosshair's direction arrow was drawn
+  entirely outward from the pinned edge position, so wherever there was
+  no letterbox margin it landed outside the widget and Qt clipped it
+  away invisible; `AngleGauge` was positioned against the canvas
+  widget's raw bottom edge while its own PAN/EĞİM label used the
+  letterboxed image's bottom edge, leaving a gap between them whenever
+  a letterbox margin existed. Also this round: `KALİBRE DEĞİL` clipped
+  at the frame edge, and the SAFE screen mixing English chrome
+  (`ACKNOWLEDGE`) with Turkish content — see Part 0's own a-j list, the
+  reason `core/strings.py`'s `UI_LABEL_TR` exists at all.
+- Round 2 (left/right panels, tuning window, operator input):
+  `REASON_CODE_TR` was ASCII-transliterated throughout (`degil` for
+  `değil`, etc.) since before the GUI existed — nothing had ever
+  displayed it prominently enough to notice until the AI recommendation
+  card did. The lock banner and the telemetry strip's own OPERATOR
+  AKTİF/TAKİP YARDIMI ON row were positioned from two independent
+  magic-number offsets and visibly overlapped once a real scene
+  exercised both at once. `QGroupBox`/`QScrollArea`/`QComboBox`/
+  `QLineEdit`/`QCheckBox` had no rules in `theme.py`'s shared stylesheet
+  at all, since nothing before the tuning window ever used them — left
+  unstyled, it was light-text-on-light-background, nearly unreadable. A
+  `QLabel` showing a long fire-blocked reason centre-clipped illegibly
+  from both ends instead of eliding.
+
+None of the above shows up as a failing assertion; every one only shows
+up as a wrong-looking pixel. Screenshots for the current state live in
+`docs/screenshots/` — see the Architecture section.
 
 **A queued Qt paint event can outlive the widget it was queued for.**
 A widget that calls `update()` (schedules a deferred repaint) and is
@@ -777,6 +850,20 @@ All marked `TODO(measurement)` in code — never silently guessed:
 - **Muzzle offset from the rotation centre**
   (`TurretGeometry.muzzle_offset_z_m`, currently 0.0) — affects slant
   range, currently assumed negligible.
+- **HSV thresholds for both target colours**
+  (`vision.l2_color._DEFAULT_CLASSES`: hostile's two hue ranges,
+  friendly's one, both classes' `sat_min`/`val_min`) — hex-to-HSV
+  conversion math applied to the competition spec's stated hex colours
+  (`#F50A0A`/`#00A3E0`), never measured against the actual printed
+  target models under real (indoor competition) lighting. Theory, not
+  measurement, same distinction as everything else in this section —
+  printed ink, ambient colour temperature and camera white balance can
+  all shift measured hue/saturation well away from the hex-derived
+  value. `ui/tuning_window.py` exists specifically to recalibrate these
+  once the real models and venue are available; `config/hsv/` presets
+  are gitignored, so a recalibrated value never silently ships as a
+  new default without someone deliberately changing
+  `_DEFAULT_CLASSES` itself.
 
 ## Open questions / not yet built
 
