@@ -6,9 +6,15 @@ import numpy as np
 from celikkubbe.core.clock import FakeClock
 from celikkubbe.core.types import IFF, Frame, Layer
 from celikkubbe.vision.l2_color import (
+    ColorClass,
     ColorDetector,
     ColorDetectorConfig,
+    config_from_dict,
+    config_to_dict,
     is_under_resolved,
+    list_hsv_presets,
+    load_hsv_preset,
+    save_hsv_preset,
 )
 from celikkubbe.vision.sources import (
     FRIENDLY_HEX,
@@ -242,3 +248,78 @@ def test_debug_masks_populated_only_when_requested() -> None:
     assert "friendly" in debug_on.hsv_masks
     assert "hostile" in debug_on.morphed_masks
     assert len(debug_on.contours) >= 1
+
+
+# --- HSV preset persistence ---
+
+
+def test_config_to_dict_and_back_round_trips() -> None:
+    config = ColorDetectorConfig(morph_kernel=7, min_area_px=20, circularity_min=0.5)
+    restored = config_from_dict(config_to_dict(config))
+    assert restored.morph_kernel == 7
+    assert restored.min_area_px == 20
+    assert restored.circularity_min == 0.5
+    assert restored.classes == config.classes
+
+
+def test_config_from_dict_falls_back_to_defaults_for_missing_keys() -> None:
+    defaults = ColorDetectorConfig()
+    restored = config_from_dict({})
+    assert restored.morph_kernel == defaults.morph_kernel
+    assert restored.classes == defaults.classes
+
+
+def test_config_from_dict_keeps_default_hue_for_a_class_missing_from_the_preset() -> None:
+    defaults = ColorDetectorConfig()
+    data = {"classes": {"hostile": {"sat_min": 120, "val_min": 60}}}
+    restored = config_from_dict(data)
+    hostile = next(c for c in restored.classes if c.name == "hostile")
+    friendly = next(c for c in restored.classes if c.name == "friendly")
+    assert hostile.sat_min == 120
+    assert hostile.val_min == 60
+    hostile_defaults = next(c for c in defaults.classes if c.name == "hostile")
+    assert hostile.hue_ranges == hostile_defaults.hue_ranges
+    friendly_defaults = next(c for c in defaults.classes if c.name == "friendly")
+    assert friendly == friendly_defaults
+
+
+def test_save_then_load_hsv_preset_round_trips(tmp_path) -> None:
+    config = ColorDetectorConfig(
+        morph_kernel=3,
+        min_area_px=8,
+        classes=(
+            ColorClass("hostile", IFF.HOSTILE, ((0, 8), (172, 180)), 100, 60),
+            ColorClass("friendly", IFF.FRIENDLY, ((92, 106),), 100, 60),
+        ),
+    )
+    path = tmp_path / "indoor.json"
+    save_hsv_preset(config, path)
+
+    loaded = load_hsv_preset(path)
+    assert loaded.morph_kernel == 3
+    assert loaded.min_area_px == 8
+    assert loaded.classes == config.classes
+
+
+def test_load_hsv_preset_returns_defaults_when_file_is_missing(tmp_path) -> None:
+    loaded = load_hsv_preset(tmp_path / "does_not_exist.json")
+    assert loaded == ColorDetectorConfig()
+
+
+def test_load_hsv_preset_returns_defaults_for_corrupt_json(tmp_path) -> None:
+    path = tmp_path / "corrupt.json"
+    path.write_text("{not valid json")
+    loaded = load_hsv_preset(path)
+    assert loaded == ColorDetectorConfig()
+
+
+def test_list_hsv_presets_returns_sorted_stems(tmp_path) -> None:
+    (tmp_path / "hall.json").write_text("{}")
+    (tmp_path / "indoor.json").write_text("{}")
+    (tmp_path / "synthetic.json").write_text("{}")
+    (tmp_path / "not_a_preset.txt").write_text("ignored")
+    assert list_hsv_presets(tmp_path) == ("hall", "indoor", "synthetic")
+
+
+def test_list_hsv_presets_returns_empty_tuple_when_directory_is_missing(tmp_path) -> None:
+    assert list_hsv_presets(tmp_path / "nope") == ()

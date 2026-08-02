@@ -48,3 +48,8 @@ htmlcov/
 # Env / secrets
 .env
 .env.*
+
+# Runtime calibration/tuning data (config/boresight.json,
+# config/turret_geometry.json, config/hsv/*.json) -- machine- and
+# rig-specific, created on first save, never source.
+config/

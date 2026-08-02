@@ -239,6 +239,19 @@ class PipelineWorker(QThread):
         with self._snapshot_lock:
             return self._latest_snapshot
 
+    @property
+    def detector(self) -> ColorDetector:
+        """The live L2 detector -- exposed so the HSV tuning window can
+        read and live-apply ``ColorDetectorConfig`` changes. Unsynchronised:
+        ``_tick_inner`` reads ``detector.config`` every tick on this
+        worker's own thread with no lock, matching every other read of
+        ``self._detector`` in this class, so a caller must replace the
+        whole config object (``detector.config = new_config``) rather
+        than mutating individual fields in place -- a single reference
+        swap is atomic under the GIL, a field-by-field mutation is not.
+        """
+        return self._detector
+
     # --- LinkWorker callback: runs on LinkWorker's own background
     # thread, not this one, hence its own lock rather than reusing
     # _snapshot_lock or _operator_lock ---

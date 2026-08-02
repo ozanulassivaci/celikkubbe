@@ -14,8 +14,10 @@ whether a red blob is a drone or an F-16.
 
 from __future__ import annotations
 
+import json
 import math
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -32,6 +34,11 @@ from celikkubbe.core.types import (
 )
 
 DEPTH_SAMPLE_WINDOW_PX = 5  # odd window sampled around the centroid for depth range
+
+# Repo-root config/ -- runtime tuning data, not the compile-time
+# thresholds in core/config.py. Created on first save; absent entirely
+# until then, same convention as geometry.calibration's config/ paths.
+DEFAULT_HSV_PRESETS_DIR = Path("config/hsv")
 
 
 @dataclass(frozen=True)
@@ -258,3 +265,85 @@ class ColorDetector:
         )
         contour_debug = Contour(color_class.name, bbox_px, area, circularity, True, None)
         return detection, contour_debug
+
+
+# --- tuning preset persistence ---
+# The HSV tuning window is the only consumer of these; they live here
+# rather than in ui/ because ColorDetectorConfig -- what a preset
+# actually captures -- belongs to this module, the same reasoning
+# geometry.calibration owns BoresightTable's own JSON persistence.
+
+
+def config_to_dict(config: ColorDetectorConfig) -> dict:
+    return {
+        "morph_kernel": config.morph_kernel,
+        "min_area_px": config.min_area_px,
+        "circularity_min": config.circularity_min,
+        "require_circularity": config.require_circularity,
+        "classes": {
+            c.name: {
+                "hue_ranges": [list(r) for r in c.hue_ranges],
+                "sat_min": c.sat_min,
+                "val_min": c.val_min,
+            }
+            for c in config.classes
+        },
+    }
+
+
+def config_from_dict(data: dict) -> ColorDetectorConfig:
+    """Missing keys fall back to the hex-derived defaults -- a preset
+    need not cover every field, and a class absent from
+    ``data["classes"]`` keeps its own default hue/sat/val rather than
+    vanishing from the detector entirely.
+    """
+    defaults = ColorDetectorConfig()
+    by_name = {c.name: c for c in defaults.classes}
+    classes = []
+    for name, class_defaults in by_name.items():
+        entry = data.get("classes", {}).get(name)
+        if entry is None:
+            classes.append(class_defaults)
+            continue
+        classes.append(
+            ColorClass(
+                name=name,
+                iff=class_defaults.iff,
+                hue_ranges=tuple(
+                    tuple(r) for r in entry.get("hue_ranges", class_defaults.hue_ranges)
+                ),
+                sat_min=entry.get("sat_min", class_defaults.sat_min),
+                val_min=entry.get("val_min", class_defaults.val_min),
+            )
+        )
+    return ColorDetectorConfig(
+        classes=tuple(classes),
+        morph_kernel=data.get("morph_kernel", defaults.morph_kernel),
+        min_area_px=data.get("min_area_px", defaults.min_area_px),
+        circularity_min=data.get("circularity_min", defaults.circularity_min),
+        require_circularity=data.get("require_circularity", defaults.require_circularity),
+    )
+
+
+def save_hsv_preset(config: ColorDetectorConfig, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(config_to_dict(config), indent=2))
+
+
+def load_hsv_preset(path: Path) -> ColorDetectorConfig:
+    """Missing or unreadable file -> the hex-derived defaults, not a
+    crash -- same contract as geometry.calibration.load_boresight.
+    """
+    if not path.exists():
+        return ColorDetectorConfig()
+    try:
+        data = json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError, KeyError, TypeError):
+        return ColorDetectorConfig()
+    return config_from_dict(data)
+
+
+def list_hsv_presets(directory: Path = DEFAULT_HSV_PRESETS_DIR) -> tuple[str, ...]:
+    if not directory.is_dir():
+        return ()
+    return tuple(sorted(p.stem for p in directory.glob("*.json")))

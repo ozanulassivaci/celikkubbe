@@ -139,6 +139,27 @@ QWidget {{
     border-radius: 4px;
 }}
 
+QGroupBox {{
+    background-color: {bg_elevated};
+    border: 1px solid {border};
+    border-radius: 4px;
+    margin-top: 10px;
+    padding-top: 14px;
+    font-weight: 600;
+}}
+
+QGroupBox::title {{
+    subcontrol-origin: margin;
+    left: 8px;
+    padding: 0 4px;
+    color: {text_dim};
+}}
+
+QScrollArea, QScrollArea > QWidget > QWidget {{
+    background-color: transparent;
+    border: none;
+}}
+
 QLabel {{
     color: {text_primary};
 }}
@@ -185,6 +206,42 @@ QPushButton[role="primary"] {{
     border-color: {accent};
     color: {bg_base};
     font-weight: 600;
+}}
+
+QComboBox, QLineEdit {{
+    background-color: {bg_elevated};
+    border: 1px solid {border_bright};
+    border-radius: 3px;
+    padding: 3px 8px;
+    color: {text_primary};
+}}
+
+QComboBox:hover, QLineEdit:focus {{
+    border-color: {accent};
+}}
+
+QComboBox QAbstractItemView {{
+    background-color: {bg_elevated};
+    border: 1px solid {border_bright};
+    color: {text_primary};
+    selection-background-color: {accent};
+}}
+
+QCheckBox {{
+    color: {text_primary};
+}}
+
+QCheckBox::indicator {{
+    width: 14px;
+    height: 14px;
+    border: 1px solid {border_bright};
+    border-radius: 2px;
+    background-color: {bg_elevated};
+}}
+
+QCheckBox::indicator:checked {{
+    background-color: {accent};
+    border-color: {accent};
 }}
 
 #statusStrip {{
