@@ -28,10 +28,11 @@ from collections import deque
 from PyQt6.QtCore import QThread, pyqtSignal
 
 from celikkubbe.core import config, modes, priority
-from celikkubbe.core.commands import Command
+from celikkubbe.core.commands import Command, Fire, Goto
 from celikkubbe.core.engagement import step as engagement_step
 from celikkubbe.core.health import CameraHealth, DepthHealth, DetectionHealth, InferenceHealth
 from celikkubbe.core.protocols import Clock, FrameSource, TurretLink
+from celikkubbe.core.strings import SELF_TEST_DETAIL_TR
 from celikkubbe.core.types import (
     Axis,
     EngagementState,
@@ -51,7 +52,7 @@ from celikkubbe.geometry.calibration import DEFAULT_BORESIGHT_PATH, load_boresig
 from celikkubbe.geometry.frames import DEFAULT_TURRET_GEOMETRY
 from celikkubbe.geometry.projection import crosshair_with_indicator
 from celikkubbe.geometry.solver import AimSolution, AimSolver
-from celikkubbe.io.codec import EventId, TelemetryFrame
+from celikkubbe.io.codec import AckResult, EventId, TelemetryFrame
 from celikkubbe.io.link_worker import LinkWorker
 from celikkubbe.tracking.manager import TrackManager
 from celikkubbe.ui.snapshot import HealthSnapshot, PipelineTimings, UiSnapshot
@@ -69,6 +70,25 @@ _IDLE_SLEEP_S = 0.001
 # Sliding window for the SAFE overlay's event log -- old entries fall off
 # the front rather than growing unbounded over a long session.
 _EVENT_LOG_MAXLEN = 20
+
+# Self-test (M1) thresholds. These gate M1 -> M2 (via modes.step()) but
+# are computed entirely here, not core/config.py: core/modes.py only ever
+# consumes the resulting SelfTestResult.passed, the same way io/'s own
+# link-timing constants live in io/link_worker.py rather than
+# core/config.py, since they are not a core/ decision threshold either.
+# Deliberately stricter than the *ongoing* health monitors' thresholds
+# (config.MIN_FPS=15, config.INFERENCE_FAIL_MS=100): a one-time bring-up
+# check should demand more headroom than "still limping along" does.
+_SELF_TEST_MIN_FPS = 30.0
+_SELF_TEST_MAX_INFERENCE_MS = 30.0
+_SELF_TEST_MOVE_TOLERANCE_DEG = 1.0
+_SELF_TEST_MOVE_DELTA_DEG = 3.0  # small verification nudge, not an operational move
+_SELF_TEST_MOVE_TIMEOUT_MS = 5000.0  # generous; a 3 deg nudge normally settles in well under 1s
+# Float-precision slack on the FPS threshold: a source ticking at exactly
+# FPS_TARGET's own period measures fractionally under 30.0 from ordinary
+# float division error, not a real shortfall -- same idea as io/
+# link_worker.py's _TIMING_EPSILON_MS on its own millisecond comparisons.
+_SELF_TEST_FPS_EPSILON = 0.5
 
 
 def _hit_result_from_ammo_delta(previous: int, current: int) -> HitResult | None:
@@ -147,6 +167,15 @@ class PipelineWorker(QThread):
         self._last_tick_start: float | None = None
         self._last_telemetry_t: float | None = None
         self._last_self_test_display: SelfTestResult | None = None
+
+        # Self-test (M1) active-check state -- see _reset_self_test_active_checks.
+        self._pan_tilt_test_state = "idle"  # "idle" -> "moving" -> "done"
+        self._pan_tilt_test_target: tuple[float, float] | None = None
+        self._pan_tilt_test_started_t: float | None = None
+        self._pan_tilt_test_passed: bool | None = None
+        self._pan_tilt_test_error_deg: float | None = None
+        self._fire_lock_test_passed: bool | None = None
+        self._fire_lock_test_detail: str | None = None
 
     # --- GUI-thread-facing: thread-safe setters ---
 
@@ -266,10 +295,18 @@ class PipelineWorker(QThread):
         with self._operator_lock:
             operator = self._operator_input
 
-        self_test_result = self._advance_self_test() if self._state.mode is Mode.M1_INIT else None
         ack_fault = self._ack_fault.is_set()
         if ack_fault:
             self._ack_fault.clear()
+            if self._state.mode is Mode.M4_SAFE:
+                # About to re-enter M1_INIT for a fresh self-test -- the
+                # active checks (pan/tilt move, fire lock) must run again,
+                # not report a stale result from the previous attempt.
+                self._reset_self_test_active_checks()
+
+        self_test_result = (
+            self._advance_self_test(telemetry) if self._state.mode is Mode.M1_INIT else None
+        )
 
         next_mode, mode_commands = modes.step(
             self._state.mode,
@@ -294,27 +331,36 @@ class PipelineWorker(QThread):
             tracks=tuple(scored),
             last_self_test=self._last_self_test_display,
         )
-        engagement_result = engagement_step(
-            state=self._state,
-            tracks=scored,
-            telemetry=telemetry,
-            hit_result=hit_result,
-            operator=operator,
-            aim_solutions=aim_solutions,
-            now=self._clock.now(),
-        )
-        self._send(engagement_result.commands)
-        self._state = dataclasses.replace(
-            self._state,
-            engagement=engagement_result.engagement,
-            selected_track_id=engagement_result.selected_track_id,
-            attempts=engagement_result.attempts,
-            deferred=engagement_result.deferred,
-            gate_fail_since=engagement_result.gate_fail_since,
-            commanded_pan_deg=engagement_result.commanded_pan_deg,
-            commanded_tilt_deg=engagement_result.commanded_tilt_deg,
-            telemetry=telemetry,
-        )
+        if next_mode is Mode.M1_INIT:
+            # Self-test is still running: never let engagement's own aim
+            # commands compete with the self-test's own pan/tilt
+            # verification move (or move the turret at all before self-
+            # test has confirmed the axes respond correctly). Detection
+            # and tracking still run either way, for display -- only
+            # engagement's own state advancement and commands pause.
+            self._state = dataclasses.replace(self._state, telemetry=telemetry)
+        else:
+            engagement_result = engagement_step(
+                state=self._state,
+                tracks=scored,
+                telemetry=telemetry,
+                hit_result=hit_result,
+                operator=operator,
+                aim_solutions=aim_solutions,
+                now=self._clock.now(),
+            )
+            self._send(engagement_result.commands)
+            self._state = dataclasses.replace(
+                self._state,
+                engagement=engagement_result.engagement,
+                selected_track_id=engagement_result.selected_track_id,
+                attempts=engagement_result.attempts,
+                deferred=engagement_result.deferred,
+                gate_fail_since=engagement_result.gate_fail_since,
+                commanded_pan_deg=engagement_result.commanded_pan_deg,
+                commanded_tilt_deg=engagement_result.commanded_tilt_deg,
+                telemetry=telemetry,
+            )
         step_ms = (self._clock.now() - step_start) * 1000.0
 
         crosshair_px, crosshair_offscreen, crosshair_bearing_deg = self._solve_crosshair(
@@ -360,6 +406,7 @@ class PipelineWorker(QThread):
             frame=frame,
             detections=tuple(detections),
             tracks=tuple(scored),
+            ordered_track_ids=tuple(self._previous_order),
             state=self._state,
             telemetry=telemetry,
             telemetry_frame=telemetry_frame,
@@ -440,31 +487,48 @@ class PipelineWorker(QThread):
 
     # --- self-test (M1) ---
 
-    def _advance_self_test(self) -> SelfTestResult | None:
-        """Runs continuously while in M1_INIT; ``state.last_self_test`` is
-        always refreshed with the latest attempt for the overlay to show
-        live PASS/FAIL rows. Only handed to ``modes.step()`` -- which is
-        what actually moves the mode on -- once every item passes, or the
-        operator explicitly retries: an item still failing within an
-        ordinary startup grace window must not trip M4_SAFE on its own,
-        e.g. before a webcam has even had time to open.
+    def _reset_self_test_active_checks(self) -> None:
+        """Called when re-entering M1_INIT (a fresh acknowledged fault, or
+        construction): the multi-tick active checks must run again from
+        scratch, not report a stale result left over from a previous
+        attempt.
         """
-        camera_ok = self._camera_health.healthy and self._frames_seen > 0
-        link_ok = not self._link_worker.link_lost
+        self._pan_tilt_test_state = "idle"
+        self._pan_tilt_test_target = None
+        self._pan_tilt_test_started_t = None
+        self._pan_tilt_test_passed = None
+        self._pan_tilt_test_error_deg = None
+        self._fire_lock_test_passed = None
+        self._fire_lock_test_detail = None
+
+    def _advance_self_test(self, telemetry: Telemetry | None) -> SelfTestResult | None:
+        """Six items, matching docs/protocol.md's startup sequence and the
+        mode machine's own entry requirements: camera FPS, link response,
+        a real pan/tilt verification move, the firing mechanism's fail-
+        safe default, inference latency, and driver alarms. Runs
+        continuously while in M1_INIT; ``state.last_self_test`` is always
+        refreshed with the latest attempt for the overlay to show live
+        rows. Only handed to ``modes.step()`` -- which is what actually
+        moves the mode on -- once every item passes, or the operator
+        explicitly retries: an item still failing within an ordinary
+        startup grace window must not trip M4_SAFE on its own, e.g.
+        before a webcam or the pan/tilt verification move has finished.
+        """
+        camera_ok, camera_measured, camera_detail = self._self_test_camera()
+        link_ok, link_measured, link_detail = self._self_test_link()
+        move_ok, move_measured, move_detail = self._self_test_pan_tilt_move(telemetry)
+        fire_ok, fire_detail = self._self_test_fire_lock()
+        inference_ok, inference_measured, inference_detail = self._self_test_inference()
+        alarms_ok, alarms_detail = self._self_test_driver_alarms(telemetry)
+
         result = SelfTestResult(
             items=(
-                SelfTestItem(
-                    "camera",
-                    camera_ok,
-                    None if camera_ok else "no camera signal",
-                    self._camera_health.value if self._frames_seen >= 2 else None,
-                ),
-                SelfTestItem(
-                    "stm32_link",
-                    link_ok,
-                    None if link_ok else "no telemetry",
-                    self._link_worker.stats.round_trip_latency_ms,
-                ),
+                SelfTestItem("camera", camera_ok, camera_detail, camera_measured),
+                SelfTestItem("stm32_link", link_ok, link_detail, link_measured),
+                SelfTestItem("pan_tilt_move", move_ok, move_detail, move_measured),
+                SelfTestItem("fire_lock", fire_ok, fire_detail, None),
+                SelfTestItem("inference_time", inference_ok, inference_detail, inference_measured),
+                SelfTestItem("driver_alarms", alarms_ok, alarms_detail, None),
             )
         )
         self._last_self_test_display = result
@@ -475,3 +539,129 @@ class PipelineWorker(QThread):
         if result.passed or retry:
             return result
         return None
+
+    def _self_test_camera(self) -> tuple[bool, float | None, str | None]:
+        if self._frames_seen < 2:
+            return False, None, SELF_TEST_DETAIL_TR["no_camera_signal"]
+        measured = self._camera_health.value
+        passed = measured >= _SELF_TEST_MIN_FPS - _SELF_TEST_FPS_EPSILON
+        detail = None if passed else SELF_TEST_DETAIL_TR["fps_too_low"]
+        return passed, measured, detail
+
+    def _self_test_link(self) -> tuple[bool, float | None, str | None]:
+        link_ok = not self._link_worker.link_lost
+        measured = self._link_worker.stats.round_trip_latency_ms
+        detail = None if link_ok else SELF_TEST_DETAIL_TR["no_telemetry"]
+        return link_ok, measured, detail
+
+    def _self_test_pan_tilt_move(
+        self, telemetry: Telemetry | None
+    ) -> tuple[bool, float | None, str | None]:
+        """A small verification nudge, not an operational move: proves the
+        commanded axes actually respond and settle within
+        _SELF_TEST_MOVE_TOLERANCE_DEG of where they were told to go,
+        using the same Goto path an operational aim would -- catching a
+        disconnected or miswired axis before the competition run does,
+        not just before a target is ever selected.
+
+        Completion is gated on the *measured position* reaching
+        tolerance, not on ``motion_complete`` alone: a trapezoidal
+        profile starts from rest, so velocity -- and therefore
+        ``motion_complete``, which SimTurretLink computes from velocity
+        -- legitimately reads "complete" for the single instant the move
+        is issued, before the axis has gone anywhere. See
+        SimTurretLink._compute_mcu_mode's own docstring for the same
+        quirk affecting a different field. A generous timeout still
+        exists so a genuinely stuck axis eventually reports FAIL with
+        its real error instead of waiting forever.
+        """
+        if telemetry is None:
+            return False, None, SELF_TEST_DETAIL_TR["no_telemetry"]
+
+        if self._pan_tilt_test_state == "idle":
+            pan_lo, pan_hi = config.PAN_LIMIT_DEG
+            tilt_lo, tilt_hi = config.TILT_LIMIT_DEG
+            target_pan = _pick_verification_target(
+                telemetry.pan_deg, _SELF_TEST_MOVE_DELTA_DEG, pan_lo, pan_hi
+            )
+            target_tilt = _pick_verification_target(
+                telemetry.tilt_deg, _SELF_TEST_MOVE_DELTA_DEG, tilt_lo, tilt_hi
+            )
+            self._pan_tilt_test_target = (target_pan, target_tilt)
+            self._pan_tilt_test_started_t = self._clock.now()
+            self._link_worker.send(
+                Goto(target_pan, target_tilt, config.AIM_MAX_VEL_DPS, config.AIM_MAX_ACCEL_DPS2)
+            )
+            self._pan_tilt_test_state = "moving"
+            return False, None, SELF_TEST_DETAIL_TR["in_progress"]
+
+        if self._pan_tilt_test_state == "moving":
+            assert self._pan_tilt_test_target is not None
+            assert self._pan_tilt_test_started_t is not None
+            target_pan, target_tilt = self._pan_tilt_test_target
+            error = max(abs(telemetry.pan_deg - target_pan), abs(telemetry.tilt_deg - target_tilt))
+            within_tolerance = error <= _SELF_TEST_MOVE_TOLERANCE_DEG
+            elapsed_ms = (self._clock.now() - self._pan_tilt_test_started_t) * 1000.0
+            timed_out = elapsed_ms >= _SELF_TEST_MOVE_TIMEOUT_MS
+            if not (within_tolerance or timed_out):
+                return False, None, SELF_TEST_DETAIL_TR["in_progress"]
+            self._pan_tilt_test_passed = within_tolerance
+            self._pan_tilt_test_error_deg = error
+            self._pan_tilt_test_state = "done"
+
+        passed = bool(self._pan_tilt_test_passed)
+        error = self._pan_tilt_test_error_deg
+        detail = None if passed else SELF_TEST_DETAIL_TR["move_error"].format(error=error)
+        return passed, error, detail
+
+    def _self_test_fire_lock(self) -> tuple[bool, str | None]:
+        """Confirms the fail-safe default: attempting to fire while
+        disarmed (which is always true here -- nothing arms anything
+        before M3) must be rejected, not accepted. Sent directly on the
+        raw link, bypassing LinkWorker's queue: SimTurretLink's send()
+        dispatches synchronously, so the result is available to read
+        back the same tick -- no multi-tick wait needed, unlike the
+        pan/tilt move above. Runs once and caches its result: repeatedly
+        firing a test shot every tick while M1_INIT persists would be
+        wasteful and, against real hardware, audible.
+        """
+        if self._fire_lock_test_passed is not None:
+            return self._fire_lock_test_passed, self._fire_lock_test_detail
+
+        self._link.send(Fire(count=1))
+        last_ack = getattr(self._link, "last_ack", None)
+        if last_ack is None:
+            passed, detail = False, SELF_TEST_DETAIL_TR["cannot_verify"]
+        else:
+            passed = last_ack is not AckResult.OK
+            detail = None if passed else SELF_TEST_DETAIL_TR["fire_not_rejected"]
+        self._fire_lock_test_passed = passed
+        self._fire_lock_test_detail = detail
+        return passed, detail
+
+    def _self_test_inference(self) -> tuple[bool, float | None, str | None]:
+        if self._frames_seen < 1:
+            return False, None, SELF_TEST_DETAIL_TR["no_camera_signal"]
+        measured = self._inference_health.value
+        passed = measured <= _SELF_TEST_MAX_INFERENCE_MS
+        detail = None if passed else SELF_TEST_DETAIL_TR["inference_slow"]
+        return passed, measured, detail
+
+    def _self_test_driver_alarms(self, telemetry: Telemetry | None) -> tuple[bool, str | None]:
+        if telemetry is None:
+            return False, SELF_TEST_DETAIL_TR["no_telemetry"]
+        if telemetry.driver_alarm_pan:
+            return False, SELF_TEST_DETAIL_TR["driver_alarm_pan"]
+        if telemetry.driver_alarm_tilt:
+            return False, SELF_TEST_DETAIL_TR["driver_alarm_tilt"]
+        return True, None
+
+
+def _pick_verification_target(current_deg: float, delta_deg: float, lo: float, hi: float) -> float:
+    """A small nudge in whichever direction stays inside the software
+    limits -- the self-test move must never itself trip LimitGate.
+    """
+    candidate = current_deg + delta_deg
+    if candidate > hi:
+        candidate = current_deg - delta_deg
+    return min(hi, max(lo, candidate))

@@ -23,7 +23,14 @@ from celikkubbe.core.types import (
 )
 from celikkubbe.ui import theme
 from celikkubbe.ui.snapshot import HealthSnapshot, PipelineTimings, UiSnapshot
-from celikkubbe.ui.video_canvas import VideoCanvas, compute_letterbox, frame_to_pixmap, place_label
+from celikkubbe.ui.video_canvas import (
+    VideoCanvas,
+    compute_letterbox,
+    frame_to_pixmap,
+    inset_point,
+    place_badge,
+    place_label,
+)
 
 from ..factories import make_state, make_track
 
@@ -87,6 +94,7 @@ def _snapshot(
         frame=frame if frame is not None else _frame(),
         detections=(),
         tracks=tracks,
+        ordered_track_ids=tuple(t.track_id for t in tracks),
         state=state if state is not None else make_state(tracks=tracks),
         telemetry=None,
         telemetry_frame=None,
@@ -271,6 +279,57 @@ def test_dimmed_crosshair_shown_for_estimated_intrinsics(qapp):
     assert _has_pixel_near(
         image, int(expected_x), int(expected_y), QColor(theme.TEXT_MUTED), radius=16
     )
+
+
+# --- Part 0a/0b fixes: badge clipping, crosshair edge inset ---
+
+
+@pytest.mark.parametrize(
+    "x,y",
+    [
+        (0.0, 0.0),  # top-left corner
+        (400.0, 0.0),  # top-right corner
+        (0.0, 300.0),  # bottom-left corner
+        (400.0, 300.0),  # bottom-right corner
+        (200.0, 0.0),  # top edge, centred
+        (200.0, 300.0),  # bottom edge, centred
+    ],
+)
+def test_calibration_badge_stays_inside_image_area_at_every_crosshair_position(x, y):
+    frame = QRectF(0.0, 0.0, 400.0, 300.0)
+    label = place_badge(x, y, radius=14.0, label_w=90.0, label_h=16.0, frame=frame)
+    assert label.left() >= frame.left() - 1e-6
+    assert label.right() <= frame.right() + 1e-6
+    assert label.top() >= frame.top() - 1e-6
+    assert label.bottom() <= frame.bottom() + 1e-6
+
+
+@pytest.mark.parametrize(
+    "x,y",
+    [
+        (0.0, 150.0),  # left edge
+        (400.0, 150.0),  # right edge
+        (200.0, 0.0),  # top edge
+        (200.0, 300.0),  # bottom edge
+        (0.0, 0.0),  # corner
+        (400.0, 300.0),  # opposite corner
+    ],
+)
+def test_pinned_crosshair_is_fully_visible_at_all_four_edges(x, y):
+    frame = QRectF(0.0, 0.0, 400.0, 300.0)
+    radius = 14.0
+    inset_x, inset_y = inset_point(x, y, radius + 4.0, frame)
+    # The whole reticle circle (centre +/- radius) must be inside the
+    # frame, not just its centre point.
+    assert inset_x - radius >= frame.left() - 1e-6
+    assert inset_x + radius <= frame.right() + 1e-6
+    assert inset_y - radius >= frame.top() - 1e-6
+    assert inset_y + radius <= frame.bottom() + 1e-6
+
+
+def test_inset_point_leaves_a_point_already_inside_the_margin_unchanged():
+    frame = QRectF(0.0, 0.0, 400.0, 300.0)
+    assert inset_point(200.0, 150.0, 18.0, frame) == (200.0, 150.0)
 
 
 # --- box colours ---

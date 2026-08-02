@@ -37,16 +37,28 @@ def _tick(worker: PipelineWorker, clock: FakeClock) -> None:
     worker.tick()
 
 
+def _settle_self_test(worker: PipelineWorker, clock: FakeClock, max_ticks: int = 60) -> None:
+    """Self-test now includes a real pan/tilt verification move (Part 0e),
+    which takes a handful of ticks to settle -- a fixed 3-tick budget from
+    before that existed is no longer enough to reach M2_STANDBY.
+    """
+    for _ in range(max_ticks):
+        if worker._state.mode is not Mode.M1_INIT:
+            return
+        _tick(worker, clock)
+
+
 def test_status_strip_reflects_mode_engagement_and_layer(qtbot):
     clock = FakeClock()
     window, worker, link = _make_window(clock)
     qtbot.addWidget(window)
 
-    for _ in range(3):
-        _tick(worker, clock)
+    _settle_self_test(worker, clock)
+    _tick(worker, clock)
 
     snapshot = window._latest_snapshot
     assert snapshot is not None
+    assert snapshot.state.mode is Mode.M2_STANDBY
     strip = window._status_strip
     assert strip._mode_badge._text == snapshot.state.mode.value[:2]
     assert strip._engagement_badge._text == snapshot.state.engagement.value[:2]
@@ -76,10 +88,7 @@ def test_selftest_overlay_shows_in_m1_and_hides_on_success(qtbot):
     assert window._latest_snapshot.state.mode is Mode.M1_INIT
     assert not window._selftest_overlay.isHidden()
 
-    for _ in range(10):
-        _tick(worker, clock)
-        if window._latest_snapshot.state.mode is not Mode.M1_INIT:
-            break
+    _settle_self_test(worker, clock)
 
     assert window._latest_snapshot.state.mode is Mode.M2_STANDBY
     assert window._selftest_overlay.isHidden()
@@ -90,8 +99,7 @@ def test_safe_overlay_shows_in_m4_and_requires_acknowledgement(qtbot):
     window, worker, link = _make_window(clock)
     qtbot.addWidget(window)
 
-    for _ in range(3):
-        _tick(worker, clock)
+    _settle_self_test(worker, clock)
     assert window._latest_snapshot.state.mode is Mode.M2_STANDBY
 
     link.inject_estop()

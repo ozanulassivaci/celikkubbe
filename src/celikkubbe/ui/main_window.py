@@ -25,6 +25,7 @@ from PyQt6.QtWidgets import (
 
 from celikkubbe import __version__
 from celikkubbe.core import config
+from celikkubbe.core.strings import UI_LABEL_TR
 from celikkubbe.core.types import EngagementState, Layer, Mode, OperatorInput, Track
 from celikkubbe.ui import theme
 from celikkubbe.ui.overlays.safe import SafeOverlay
@@ -52,11 +53,39 @@ _ENGAGEMENT_COLOR: dict[EngagementState, str] = {
     EngagementState.S5_ENGAGE: theme.DANGER,
     EngagementState.S6_ASSESS: theme.DANGER,
 }
-_LAYER_COLOR: dict[Layer, str] = {
-    Layer.L1: theme.OK,
-    Layer.L2: theme.WARN,
-    Layer.L3: theme.ACCENT_A1,
-}
+
+
+def _layer_badge_color(layer: Layer, fallback_reason) -> str:
+    """WARN is reserved for a genuine health-triggered fallback -- not
+    for "L2 because that is the only detector that exists yet". With no
+    L1/YOLO pipeline built, active_layer is always L2 and
+    fallback_reason is always None (see HealthSnapshot's own
+    docstring), so colouring L2 as a warning by default would
+    permanently read as a degraded state for something that was never
+    actually a fallback from anything.
+    """
+    if fallback_reason is not None:
+        return theme.WARN
+    if layer is Layer.L1:
+        return theme.OK
+    if layer is Layer.L3:
+        return theme.ACCENT_A1
+    return theme.TEXT_DIM
+
+
+def _format_duration_ms(value_ms: float) -> str:
+    """L2 colour detection runs in well under a millisecond, so a fixed
+    "X.Xms" format has no resolution down there -- it always reads
+    "0.0ms", telling the operator nothing. Below 1ms this switches to
+    microseconds; below 10ms it keeps one decimal (enough resolution to
+    actually see a real number change); at or above 10ms, whole
+    milliseconds are plenty and reduce strip clutter.
+    """
+    if value_ms < 1.0:
+        return f"{value_ms * 1000.0:.0f}µs"
+    if value_ms < 10.0:
+        return f"{value_ms:.1f}ms"
+    return f"{value_ms:.0f}ms"
 
 
 class StatusStrip(QWidget):
@@ -85,7 +114,7 @@ class StatusStrip(QWidget):
             layout.addWidget(badge)
 
         self._link_label = self._add_text_label(layout, "LINK OK 999ms CRC:999")
-        self._perf_label = self._add_text_label(layout, "FPS:99.9 INF:99.9ms")
+        self._perf_label = self._add_text_label(layout, "FPS:99.9 INF:999µs L1:YOK")
         self._homing_label = self._add_text_label(layout, "HOMED P:Y T:Y")
         self._counters_label = self._add_text_label(layout, "AMMO:999 ATT:9/9 TRK:99")
         self._error_label = self._add_text_label(layout, "")
@@ -122,7 +151,8 @@ class StatusStrip(QWidget):
         self._engagement_badge.set_status(
             state.engagement.value[:2], _ENGAGEMENT_COLOR[state.engagement]
         )
-        self._layer_badge.set_status(state.active_layer.value, _LAYER_COLOR[state.active_layer])
+        layer_color = _layer_badge_color(state.active_layer, health.fallback_reason)
+        self._layer_badge.set_status(state.active_layer.value, layer_color)
 
         self._update_link_label(health)
         self._update_perf_label(health)
@@ -140,9 +170,13 @@ class StatusStrip(QWidget):
             self._link_label.setStyleSheet(f"color: {theme.DANGER}; font-weight: 600;")
 
     def _update_perf_label(self, health) -> None:
-        text = f"FPS:{health.camera_fps:.1f} INF:{health.inference_ms:.1f}ms"
+        text = f"FPS:{health.camera_fps:.1f} INF:{_format_duration_ms(health.inference_ms)}"
         if health.fallback_reason is not None:
             text += f" FALLBACK:{health.fallback_reason.value}"
+        elif health.active_layer is Layer.L2:
+            # Not a fallback -- no L1/YOLO pipeline exists yet, so L2 is
+            # simply the only detector available. See _layer_badge_color.
+            text += f" {UI_LABEL_TR['L1_UNAVAILABLE']}"
         if health.l1_recovery_countdown_s is not None:
             text += f" RECOV:{health.l1_recovery_countdown_s:.0f}s"
         self._perf_label.setText(text)

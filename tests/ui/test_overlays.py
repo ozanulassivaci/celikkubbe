@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QPushButton
+from PyQt6.QtWidgets import QLabel, QPushButton, QWidget
 
 from celikkubbe.core import strings
 from celikkubbe.core.types import Axis, ReasonCode, SelfTestItem, SelfTestResult
@@ -111,3 +111,45 @@ def test_safe_overlay_acknowledge_button_emits_signal(qtbot):
     assert len(buttons) == 1
     qtbot.mouseClick(buttons[0], Qt.MouseButton.LeftButton)
     assert received == [True]
+
+
+# --- Part 0c/0d: no stray English chrome text ---
+
+_STALE_ENGLISH_STRINGS = (
+    "PASS",
+    "FAIL",
+    "SELF-TEST",
+    "RETRY",
+    "M4 SAFE",
+    "ACKNOWLEDGE",
+    "POSITION INVALID",
+    "RE-HOMING REQUIRED",
+)
+
+
+def test_selftest_overlay_has_no_stale_english_chrome(qapp):
+    overlay = SelfTestOverlay()
+    overlay.set_result(
+        SelfTestResult(
+            items=(
+                SelfTestItem("camera", True, None, 30.0),
+                SelfTestItem("pan_tilt_move", False, "hata 3.00°", 3.0),
+            )
+        )
+    )
+    rendered = _all_text(overlay)
+    for stale in _STALE_ENGLISH_STRINGS:
+        assert stale not in rendered, stale
+
+
+def test_safe_overlay_has_no_stale_english_chrome(qapp):
+    overlay = SafeOverlay()
+    overlay.set_fault(ReasonCode.ESTOP_ACTIVE)
+    overlay.set_position_valid(False)
+    rendered = _all_text(overlay)
+    for stale in _STALE_ENGLISH_STRINGS:
+        assert stale not in rendered, stale
+
+
+def _all_text(widget: QWidget) -> str:
+    return " ".join(label.text() for label in widget.findChildren(QLabel))

@@ -93,6 +93,15 @@ class UiSnapshot:
     frame: Frame
     detections: tuple[Detection, ...]
     tracks: tuple[Track, ...]
+    # priority.order_track_ids's own hysteresis-stabilised order, exactly
+    # as PipelineWorker already computes it for priority scoring. The
+    # left panel's target list renders in this order rather than
+    # recomputing its own: a second ordering pass in the UI layer could
+    # silently diverge from this one (different hysteresis state,
+    # different tie-breaking) the same way re-running priority.py in an
+    # outer layer already risked for engagement selection -- see
+    # CLAUDE.md's aim_solutions rationale for the identical concern.
+    ordered_track_ids: tuple[int, ...]
     state: SystemState
     telemetry: Telemetry | None
     telemetry_frame: TelemetryFrame | None

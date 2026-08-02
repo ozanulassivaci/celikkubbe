@@ -4,6 +4,12 @@ No automatic dismissal: M4 requires a deliberate operator action, and
 this overlay only ever leaves the screen through acknowledge_requested,
 never on its own -- there is no timer, no auto-hide, nothing but the
 button.
+
+Layout is compact by design: fault description and homing warning first
+(the two things the operator needs to read), a height-capped event log
+below (context, not the main event), and the acknowledge button
+centred under it -- not a full-height log with everything else
+squeezed above it.
 """
 
 from __future__ import annotations
@@ -13,12 +19,14 @@ from PyQt6.QtGui import QColor, QPainter, QPaintEvent
 from PyQt6.QtWidgets import QLabel, QPlainTextEdit, QPushButton, QVBoxLayout, QWidget
 
 from celikkubbe.core import strings
+from celikkubbe.core.strings import UI_LABEL_TR
 from celikkubbe.core.types import Axis, ReasonCode
 from celikkubbe.io.codec import EventId
 from celikkubbe.ui import theme
 
 _OVERLAY_BG = QColor(0, 0, 0, 190)
 _MAX_LOG_LINES = 20
+_LOG_MAX_HEIGHT_PX = 200
 
 
 class SafeOverlay(QWidget):
@@ -30,7 +38,7 @@ class SafeOverlay(QWidget):
         outer = QVBoxLayout(self)
         outer.setContentsMargins(60, 40, 60, 40)
 
-        title = QLabel("M4 SAFE")
+        title = QLabel(UI_LABEL_TR["SAFE_TITLE"])
         title.setStyleSheet(f"color: {theme.DANGER}; font-size: 16pt; font-weight: 600;")
         outer.addWidget(title, alignment=Qt.AlignmentFlag.AlignHCenter)
 
@@ -39,7 +47,7 @@ class SafeOverlay(QWidget):
         self._fault_label.setStyleSheet(f"color: {theme.TEXT_PRIMARY};")
         outer.addWidget(self._fault_label)
 
-        self._homing_warning = QLabel("POSITION INVALID — RE-HOMING REQUIRED")
+        self._homing_warning = QLabel(UI_LABEL_TR["HOMING_WARNING"])
         self._homing_warning.setStyleSheet(f"color: {theme.WARN}; font-weight: 600;")
         self._homing_warning.setVisible(False)
         outer.addWidget(self._homing_warning)
@@ -47,6 +55,7 @@ class SafeOverlay(QWidget):
         self._log = QPlainTextEdit()
         self._log.setReadOnly(True)
         self._log.setMaximumBlockCount(_MAX_LOG_LINES)
+        self._log.setMaximumHeight(_LOG_MAX_HEIGHT_PX)
         # QPlainTextEdit's palette defaults to a white background
         # regardless of the app stylesheet's own colours -- without this
         # it renders as a jarring white box in an otherwise dark shell.
@@ -54,12 +63,13 @@ class SafeOverlay(QWidget):
             f"background-color: {theme.BG_ELEVATED}; color: {theme.TEXT_PRIMARY}; "
             f"border: 1px solid {theme.BORDER};"
         )
-        outer.addWidget(self._log, stretch=1)
+        outer.addWidget(self._log)
 
-        ack_button = QPushButton("ACKNOWLEDGE")
+        ack_button = QPushButton(UI_LABEL_TR["ACKNOWLEDGE"])
         ack_button.setProperty("role", "primary")
         ack_button.clicked.connect(self.acknowledge_requested.emit)
         outer.addWidget(ack_button, alignment=Qt.AlignmentFlag.AlignHCenter)
+        outer.addStretch(1)
 
     def set_fault(self, reason: ReasonCode | None, self_test_detail: str | None = None) -> None:
         """``self_test_detail`` takes priority: a self-test failure is the
@@ -68,7 +78,9 @@ class SafeOverlay(QWidget):
         the failing item's own detail text instead.
         """
         if self_test_detail is not None:
-            self._fault_label.setText(f"SELF-TEST: {self_test_detail}")
+            self._fault_label.setText(
+                UI_LABEL_TR["SELF_TEST_PREFIX"].format(detail=self_test_detail)
+            )
         elif reason is not None:
             self._fault_label.setText(strings.describe(reason))
         else:

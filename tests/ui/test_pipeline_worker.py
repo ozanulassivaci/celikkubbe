@@ -16,10 +16,11 @@ import dataclasses
 import pytest
 
 from celikkubbe.core.clock import FakeClock
-from celikkubbe.core.types import Mode
+from celikkubbe.core.commands import Arm
+from celikkubbe.core.types import Axis, Mode
 from celikkubbe.io.sim_link import SimTurretLink
 from celikkubbe.ui.pipeline_worker import PipelineWorker
-from celikkubbe.vision.sources import SyntheticSource, SyntheticSourceConfig
+from celikkubbe.vision.sources import SyntheticSource, SyntheticSourceConfig, SyntheticTarget
 
 _TICK_DT = 1.0 / 30.0
 
@@ -150,21 +151,137 @@ def test_emitted_snapshot_is_frozen(qtbot):
         snapshot.t = 999.0  # type: ignore[misc]
 
 
+def _settle(worker: PipelineWorker, clock: FakeClock, max_ticks: int = 200) -> None:
+    for _ in range(max_ticks):
+        if worker._state.mode is not Mode.M1_INIT:
+            return
+        clock.advance(_TICK_DT)
+        worker._link_worker.tick()
+        worker.tick()
+
+
 def test_self_test_passes_and_advances_to_standby_once_healthy(qtbot):
     clock = FakeClock()
     worker = _make_worker(clock)
 
-    for _ in range(3):
+    _settle(worker, clock)
+
+    assert worker._state.mode is Mode.M2_STANDBY
+    assert worker._state.last_self_test is not None
+    assert worker._state.last_self_test.passed
+
+
+def test_all_six_self_test_items_appear_and_pass(qtbot):
+    clock = FakeClock()
+    worker = _make_worker(clock)
+
+    _settle(worker, clock)
+
+    result = worker._state.last_self_test
+    assert result is not None
+    names = {item.name for item in result.items}
+    assert names == {
+        "camera",
+        "stm32_link",
+        "pan_tilt_move",
+        "fire_lock",
+        "inference_time",
+        "driver_alarms",
+    }
+    assert all(item.passed for item in result.items), result.items
+
+
+def test_fire_lock_check_rejects_fire_while_disarmed(qtbot):
+    clock = FakeClock()
+    worker = _make_worker(clock)
+
+    _settle(worker, clock)
+
+    fire_lock = next(i for i in worker._state.last_self_test.items if i.name == "fire_lock")
+    assert fire_lock.passed
+    # Confirmed by never having armed anything during self-test: no shot
+    # was actually accepted by the link.
+    assert worker._link.ammo_fired == 0
+
+
+def test_engagement_does_not_command_the_turret_during_self_test(qtbot):
+    """Regression test: engagement.step() runs regardless of Mode by
+    design (see CLAUDE.md), so a target visible while M1_INIT is still
+    running would otherwise select it and start commanding Goto/Fire
+    before self-test has confirmed the axes even work -- and directly
+    fight the pan/tilt verification move's own Goto, since both target
+    the same link. PipelineWorker must not run engagement_step at all
+    while still in M1_INIT.
+    """
+    clock = FakeClock()
+    worker = _make_worker(clock)  # source has one real target, per _make_source
+
+    for _ in range(5):
         clock.advance(_TICK_DT)
-        worker._link_worker.tick()  # simulate the link thread's own progress
+        worker._link_worker.tick()
+        worker.tick()
+        if worker._state.mode is Mode.M1_INIT:
+            assert worker._state.engagement.value == "S1_SEARCH"
+            assert worker._state.selected_track_id is None
+
+    _settle(worker, clock)
+    assert worker._state.mode is Mode.M2_STANDBY
+
+
+def test_off_boresight_target_produces_real_slew_and_reaches_fire(qtbot):
+    """0i: a target well off boresight must actually move the turret
+    (not stay at the synthetic default of 0,0), and motion_complete must
+    correctly gate S4_AIM -> S5_ENGAGE -- i.e. AngleGate genuinely blocks
+    until the axes have arrived, not just once selected.
+    """
+    clock = FakeClock()
+    targets = (
+        SyntheticTarget(
+            color_hex="#F50A0A", size_m=0.4, lane_fraction=0.2, range_m=5.0, start_x=0.1
+        ),
+    )
+    source = SyntheticSource(clock, SyntheticSourceConfig(targets=targets))
+    source.start()
+    link = SimTurretLink(clock)
+    worker = PipelineWorker(source, link, clock)
+
+    _settle(worker, clock)
+    assert worker._state.mode is Mode.M2_STANDBY
+
+    worker._state = dataclasses.replace(worker._state, mode=Mode.M3_OPERATIONAL)
+    link.send(Arm())  # what modes.step() itself sends on a real M2 -> M3 transition
+
+    reached_s5 = False
+    for _ in range(150):
+        clock.advance(_TICK_DT)
+        worker._link_worker.tick()
+        worker.tick()
+        if worker._state.engagement.value in ("S5_ENGAGE", "S6_ASSESS") or link.ammo_fired > 0:
+            reached_s5 = True
+            break
+
+    assert reached_s5, worker._state.engagement
+    telemetry = worker.latest_snapshot.telemetry
+    # The target is well off-axis; a turret that never actually slewed
+    # would still read (0, 0).
+    assert abs(telemetry.pan_deg) > 5.0 or abs(telemetry.tilt_deg) > 5.0
+
+
+def test_driver_alarm_fails_that_self_test_item_specifically(qtbot):
+    clock = FakeClock()
+    worker = _make_worker(clock)
+    worker._link.inject_driver_alarm(Axis.PAN)
+
+    for _ in range(10):
+        clock.advance(_TICK_DT)
+        worker._link_worker.tick()
         worker.tick()
 
-    assert worker._state.mode in (Mode.M2_STANDBY, Mode.M1_INIT)
-    # camera health needs >=2 frame timestamps and link needs a telemetry
-    # reply -- both are true after a few ticks with a live SimTurretLink.
-    assert worker._state.last_self_test is not None
-    if worker._state.last_self_test.passed:
-        assert worker._state.mode is Mode.M2_STANDBY
+    result = worker._state.last_self_test
+    assert result is not None
+    alarms_item = next(i for i in result.items if i.name == "driver_alarms")
+    assert not alarms_item.passed
+    assert worker._state.mode is Mode.M1_INIT
 
 
 def test_retry_self_test_forces_submission_while_still_failing(qtbot):

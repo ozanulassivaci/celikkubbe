@@ -36,7 +36,14 @@ from PyQt6.QtWidgets import QWidget
 
 from celikkubbe.core import config
 from celikkubbe.core.strings import UI_LABEL_TR
-from celikkubbe.core.types import IFF, CameraIntrinsics, EngagementState, Track, TrackStatus
+from celikkubbe.core.types import (
+    IFF,
+    CameraIntrinsics,
+    EngagementState,
+    Stage,
+    Track,
+    TrackStatus,
+)
 from celikkubbe.geometry.solver import AimSolution
 from celikkubbe.ui import theme
 from celikkubbe.ui.snapshot import UiSnapshot
@@ -151,6 +158,34 @@ def place_label(box: QRectF, label_w: float, label_h: float, frame: QRectF) -> Q
     if y + label_h > frame.bottom():
         y = frame.bottom() - label_h
     return QRectF(x, y, label_w, label_h)
+
+
+def inset_point(x: float, y: float, inset: float, frame: QRectF) -> tuple[float, float]:
+    """Pulls (x, y) inward from every edge of ``frame`` by ``inset``, so a
+    glyph of that radius centred on the returned point never crosses the
+    boundary. A pure function so the off-screen crosshair's inset -- and
+    that it holds at all four edges, not just the one a given test frame
+    happens to exercise -- is directly testable.
+    """
+    left, top = frame.left() + inset, frame.top() + inset
+    right, bottom = frame.right() - inset, frame.bottom() - inset
+    return min(max(x, left), right), min(max(y, top), bottom)
+
+
+def place_badge(
+    x: float, y: float, radius: float, label_w: float, label_h: float, frame: QRectF
+) -> QRectF:
+    """Where a small badge caption below a point-and-radius marker (the
+    crosshair's KALİBRE DEĞİL label) should sit: centred under it,
+    flipped above if there is no room below, and clamped horizontally
+    so it never spills past the image's left/right edges regardless of
+    how close to one the marker itself is.
+    """
+    label_x = min(max(x - label_w / 2.0, frame.left()), frame.right() - label_w)
+    label_y = y + radius + 4.0
+    if label_y + label_h > frame.bottom():
+        label_y = y - radius - 4.0 - label_h
+    return QRectF(label_x, label_y, label_w, label_h)
 
 
 _IFF_COLOR: dict[IFF, str] = {
@@ -333,13 +368,7 @@ class VideoCanvas(QWidget):
         pad = 3
         label_w = metrics.width() + 2 * pad
         label_h = metrics.height() + 2 * pad
-        frame = QRectF(
-            self._transform.offset_x,
-            self._transform.offset_y,
-            self._transform.displayed_w,
-            self._transform.displayed_h,
-        )
-        label_rect = place_label(rect, label_w, label_h, frame)
+        label_rect = place_label(rect, label_w, label_h, self._image_rect())
 
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(self._brush_label_bg)
@@ -356,7 +385,9 @@ class VideoCanvas(QWidget):
     def _draw_crosshair(self, painter: QPainter, snapshot: UiSnapshot) -> None:
         if snapshot.crosshair_px is None:
             return
+        radius = 14.0
         x, y = self.normalized_to_widget(*snapshot.crosshair_px)
+        x, y = self._inset_offscreen_position(x, y, snapshot.crosshair_offscreen, radius)
         low_confidence = snapshot.aim is not None and snapshot.aim.confidence == "low"
         estimated = not snapshot.frame.intrinsics.is_reliable
         dimmed = low_confidence or estimated
@@ -366,7 +397,6 @@ class VideoCanvas(QWidget):
         pen.setWidth(2)
         painter.setPen(pen)
         painter.setBrush(Qt.BrushStyle.NoBrush)  # an outline reticle, not a filled disc
-        radius = 14.0
         painter.drawEllipse(QPointF(x, y), radius, radius)
         for dx0, dx1, dy0, dy1 in (
             (-radius - 6, -radius + 4, 0, 0),
@@ -383,12 +413,50 @@ class VideoCanvas(QWidget):
             self._draw_offscreen_arrow(painter, x, y, snapshot.crosshair_bearing_deg, color)
 
         if dimmed:
-            painter.setPen(QPen(color))
-            painter.drawText(
-                QRectF(x - 45, y + radius + 4, 90, 14),
-                Qt.AlignmentFlag.AlignCenter,
-                UI_LABEL_TR["NOT_CALIBRATED"],
-            )
+            self._draw_calibration_badge(painter, x, y, radius, color)
+
+    def _inset_offscreen_position(
+        self, x: float, y: float, offscreen: bool, radius: float
+    ) -> tuple[float, float]:
+        """Pulls the pinned crosshair in from the image edge by the
+        reticle's own radius plus a small margin, so the full glyph --
+        not just its centre point -- stays inside the visible image area.
+        Without this, a crosshair pinned exactly at u_norm/v_norm 0 or 1
+        (see crosshair_with_indicator) draws with its far half clipped by
+        the image bounds, or by the canvas widget's own bounds when there
+        is no letterbox margin on that side.
+        """
+        if not offscreen:
+            return x, y
+        frame = self._image_rect()
+        return inset_point(x, y, radius + 4.0, frame)
+
+    def _draw_calibration_badge(
+        self, painter: QPainter, x: float, y: float, radius: float, color: QColor
+    ) -> None:
+        """Centred under the crosshair, flipped above it -- and always
+        clamped horizontally inside the image area -- rather than a
+        fixed-size rect that clips whenever the crosshair sits near an
+        edge (the actual bug: KALİBRE DEĞİL's leading K cut off, or most
+        of the text gone when pinned at the frame edge).
+        """
+        text = UI_LABEL_TR["NOT_CALIBRATED"]
+        metrics = painter.fontMetrics().boundingRect(text)
+        pad = 4
+        label_w = metrics.width() + 2 * pad
+        label_h = metrics.height() + 2 * pad
+
+        label_rect = place_badge(x, y, radius, label_w, label_h, self._image_rect())
+        painter.setPen(QPen(color))
+        painter.drawText(label_rect, Qt.AlignmentFlag.AlignCenter, text)
+
+    def _image_rect(self) -> QRectF:
+        return QRectF(
+            self._transform.offset_x,
+            self._transform.offset_y,
+            self._transform.displayed_w,
+            self._transform.displayed_h,
+        )
 
     def _draw_envelope_rings(
         self,
@@ -488,12 +556,31 @@ class VideoCanvas(QWidget):
 
         state = snapshot.state
         telemetry = snapshot.telemetry
-        status_text = f"{state.mode.value} / {state.engagement.value}"
-        painter.setPen(self._pen_dim_text)
+
+        # Mode/engagement already have their own badges on the status
+        # strip below the canvas -- showing "M3_OPERATIONAL / S4_AIM"
+        # here too was pure duplication. This space is two fixed
+        # indicators instead, each lit or dimmed by real state rather
+        # than changing text, the same way the calibration badge above
+        # is shown or not rather than reworded.
+        operator_active = state.stage is Stage.STAGE_1 and bool(
+            telemetry is not None and telemetry.armed
+        )
+        tracking_aid_on = state.selected_track_id is not None
+        operator_pen = QPen(QColor(theme.OK if operator_active else theme.TEXT_MUTED))
+        tracking_pen = QPen(QColor(theme.OK if tracking_aid_on else theme.TEXT_MUTED))
+
+        painter.setPen(operator_pen)
         painter.drawText(
             QRectF(left, strip_top - 16, self._transform.displayed_w - 12, 14),
             Qt.AlignmentFlag.AlignLeft,
-            status_text,
+            UI_LABEL_TR["OPERATOR_ACTIVE"],
+        )
+        painter.setPen(tracking_pen)
+        painter.drawText(
+            QRectF(left + 140, strip_top - 16, self._transform.displayed_w - 12, 14),
+            Qt.AlignmentFlag.AlignLeft,
+            UI_LABEL_TR["TRACKING_AID_ON"],
         )
 
         pan_label, tilt_label = UI_LABEL_TR["AXIS_PAN"], UI_LABEL_TR["AXIS_TILT"]
