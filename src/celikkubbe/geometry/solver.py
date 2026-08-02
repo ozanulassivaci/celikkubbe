@@ -55,9 +55,8 @@ class AimSolver:
         self._boresight = boresight if boresight is not None else BoresightTable()
 
     def solve(self, track: Track, intr: CameraIntrinsics) -> AimSolution | None:
-        """None only for a track that is not yet CONFIRMED -- matching
-        the existing stub_aim_solutions' behaviour of not aiming at
-        tentative detections. For any CONFIRMED track, always returns an
+        """None only for a track that is not yet CONFIRMED -- not aiming
+        at tentative detections. For any CONFIRMED track, always returns an
         AimSolution, even with range assumed and confidence "low": the
         engagement FSM already treats a missing dict entry as
         NO_AIM_SOLUTION, and silently dropping a target the operator can

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import dataclasses
 import io
 from contextlib import redirect_stdout
 
@@ -8,16 +7,9 @@ import pytest
 
 from celikkubbe.core.clock import FakeClock
 from celikkubbe.core.commands import Arm, Disarm, Fire, Goto, SoftEstop
-from celikkubbe.core.types import IFF, HitResult, Track, TrackStatus
-from celikkubbe.demos.pipeline import (
-    SimulatedTurretLink,
-    _apply_injection,
-    _parse_injection,
-    run,
-    stub_aim_solutions,
-)
+from celikkubbe.core.types import HitResult
+from celikkubbe.demos.pipeline import SimulatedTurretLink, _apply_injection, _parse_injection, run
 from celikkubbe.io.sim_link import SimTurretLink
-from celikkubbe.vision.sources import estimated_intrinsics
 
 
 def test_pipeline_runs_synthetic_source_for_a_few_frames() -> None:
@@ -43,35 +35,21 @@ def test_pipeline_completes_full_s1_to_s6_cycle_for_a_single_hostile_target() ->
     assert any("eng=S1_SEARCH" in line for line in lines[9:])  # cycles back after S6
 
 
+def test_pipeline_prints_real_aim_solution_components_once_selected() -> None:
+    # Confirms geometry.solver.AimSolver is actually wired in, not the
+    # retired bearing-only stub -- az/el/lead/drop/confidence all appear
+    # once a track is selected.
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        run(["--source", "synthetic", "--targets", "1", "--frames", "20"])
+    lines = [line for line in buf.getvalue().splitlines() if "sel=1" in line]
+    assert lines
+    assert any("az=" in line and "drop=" in line and "conf=" in line for line in lines)
+
+
 def test_pipeline_requires_path_for_video_source() -> None:
     with pytest.raises(SystemExit):
         run(["--source", "video"])
-
-
-def test_stub_aim_solutions_only_covers_confirmed_tracks() -> None:
-    intrinsics = estimated_intrinsics(640, 480)
-    confirmed = Track(
-        track_id=1,
-        cls=None,
-        confidence=0.9,
-        range_m=None,
-        range_source="none",
-        iff=IFF.UNKNOWN,
-        bbox=(0.55, 0.55, 0.75, 0.75),
-        velocity=(0.0, 0.0),
-        status=TrackStatus.CONFIRMED,
-        risk_score=0.0,
-        frames_confirmed=5,
-        last_seen_t=0.0,
-    )
-    tentative = dataclasses.replace(confirmed, track_id=2, status=TrackStatus.TENTATIVE)
-
-    solutions = stub_aim_solutions([confirmed, tentative], intrinsics)
-
-    assert set(solutions) == {1}
-    az_deg, el_deg = solutions[1]
-    assert az_deg > 0  # bbox is right-of-centre
-    assert el_deg > 0  # bbox is below-centre (image y grows downward)
 
 
 def test_simulated_turret_link_arms_and_slews_towards_goto() -> None:
@@ -207,24 +185,3 @@ def test_apply_injection_rejects_unknown_fault() -> None:
     link = SimTurretLink(FakeClock())
     with pytest.raises(ValueError):
         _apply_injection(link, "not_a_real_fault", None)
-
-
-def test_stub_aim_solutions_centred_track_points_straight_ahead() -> None:
-    intrinsics = estimated_intrinsics(640, 480)
-    centred = Track(
-        track_id=1,
-        cls=None,
-        confidence=0.9,
-        range_m=None,
-        range_source="none",
-        iff=IFF.UNKNOWN,
-        bbox=(0.45, 0.45, 0.55, 0.55),
-        velocity=(0.0, 0.0),
-        status=TrackStatus.CONFIRMED,
-        risk_score=0.0,
-        frames_confirmed=5,
-        last_seen_t=0.0,
-    )
-    az_deg, el_deg = stub_aim_solutions([centred], intrinsics)[1]
-    assert az_deg == pytest.approx(0.0, abs=1e-9)
-    assert el_deg == pytest.approx(0.0, abs=1e-9)

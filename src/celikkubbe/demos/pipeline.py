@@ -23,11 +23,14 @@ started: estop, release_estop, driver_alarm_pan, driver_alarm_tilt,
 clear_driver_alarm_pan, clear_driver_alarm_tilt, link_dropout[:seconds],
 crc_errors[:rate], latency[:ms].
 
-The aim solver here is a placeholder bearing-only conversion (pixel
-offset from centre -> angle via intrinsics, no lead compensation, no
-ballistics) — real aim solving is out of scope and arrives in a later
-prompt. Likewise there is no L1/YOLO pipeline yet, so the cascade always
-reports L2.
+Aim solving uses the real geometry.solver.AimSolver: pixel -> ray ->
+turret-frame point at range -> angles -> lead -> ballistic drop ->
+boresight -> clamp. Geometry and ballistics are DEFAULT_TURRET_GEOMETRY/
+DEFAULT_BALLISTIC_TABLE (both placeholders pending real measurement, see
+geometry/frames.py and geometry/ballistics.py); boresight is loaded from
+config/boresight.json if present, otherwise the system runs uncalibrated.
+Likewise there is no L1/YOLO pipeline yet, so the cascade always reports
+L2.
 """
 
 from __future__ import annotations
@@ -46,7 +49,6 @@ from celikkubbe.core.protocols import Clock
 from celikkubbe.core.types import (
     IFF,
     Axis,
-    CameraIntrinsics,
     EngagementState,
     HitResult,
     Layer,
@@ -57,9 +59,11 @@ from celikkubbe.core.types import (
     Stage,
     SystemState,
     Telemetry,
-    Track,
-    TrackStatus,
 )
+from celikkubbe.geometry.ballistics import DEFAULT_BALLISTIC_TABLE
+from celikkubbe.geometry.calibration import DEFAULT_BORESIGHT_PATH, load_boresight
+from celikkubbe.geometry.frames import DEFAULT_TURRET_GEOMETRY
+from celikkubbe.geometry.solver import AimSolution, AimSolver
 from celikkubbe.io.sim_link import SimTurretLink
 from celikkubbe.tracking.manager import TrackManager
 from celikkubbe.vision.l2_color import ColorDetector
@@ -157,26 +161,6 @@ class SimulatedTurretLink:
     def take_hit_result(self) -> HitResult | None:
         result, self._pending_hit_result = self._pending_hit_result, None
         return result
-
-
-def stub_aim_solutions(
-    tracks: list[Track], intrinsics: CameraIntrinsics
-) -> dict[int, tuple[float, float]]:
-    """Placeholder bearing-only aim solver: pixel offset from centre ->
-    angle via intrinsics. No current-pose offset, no lead, no ballistics.
-    """
-    solutions: dict[int, tuple[float, float]] = {}
-    for track in tracks:
-        if track.status is not TrackStatus.CONFIRMED:
-            continue
-        cx = (track.bbox[0] + track.bbox[2]) / 2.0
-        cy = (track.bbox[1] + track.bbox[3]) / 2.0
-        dx_px = (cx - 0.5) * intrinsics.width
-        dy_px = (cy - 0.5) * intrinsics.height
-        az_deg = math.degrees(math.atan2(dx_px, intrinsics.fx))
-        el_deg = math.degrees(math.atan2(dy_px, intrinsics.fy))
-        solutions[track.track_id] = (az_deg, el_deg)
-    return solutions
 
 
 @dataclasses.dataclass(frozen=True)
@@ -319,6 +303,9 @@ def run(argv: list[str] | None = None) -> None:
         turret.send(Zero(Axis.TILT, 0.0))
     pending_injections = sorted(args.inject, key=lambda inj: inj.at_t)
     last_ammo_fired = 0
+    aim_solver = AimSolver(
+        DEFAULT_TURRET_GEOMETRY, DEFAULT_BALLISTIC_TABLE, load_boresight(DEFAULT_BORESIGHT_PATH)
+    )
 
     self_test = SelfTestResult(
         items=(
@@ -401,7 +388,13 @@ def run(argv: list[str] | None = None) -> None:
             for cmd in mode_commands:
                 turret.send(cmd)
 
-            aim_solutions = stub_aim_solutions(scored, frame.intrinsics)
+            solved: dict[int, AimSolution] = {}
+            for t in scored:
+                solution = aim_solver.solve(t, frame.intrinsics)
+                if solution is not None:
+                    solved[t.track_id] = solution
+            aim_solutions = {tid: (s.az_deg, s.el_deg) for tid, s in solved.items()}
+
             if isinstance(turret, SimTurretLink):
                 # No vision-based hit verification in this demo either way
                 # -- a shot the sim actually accepted resolves to a KILL,
@@ -446,11 +439,22 @@ def run(argv: list[str] | None = None) -> None:
             n_friendly = sum(1 for t in scored if t.iff is IFF.FRIENDLY)
             n_unknown = len(scored) - n_hostile - n_friendly
 
+            selected_solution = solved.get(state.selected_track_id)
+            if selected_solution is not None:
+                aim_str = (
+                    f"az={selected_solution.az_deg:6.2f} el={selected_solution.el_deg:6.2f} "
+                    f"lead=({selected_solution.lead_az_deg:+.2f},"
+                    f"{selected_solution.lead_el_deg:+.2f}) "
+                    f"drop={selected_solution.drop_deg:.2f} conf={selected_solution.confidence}"
+                )
+            else:
+                aim_str = "-"
+
             print(
                 f"[{frame_count:05d}] mode={state.mode.value:<14} "
                 f"eng={state.engagement.value:<10} layer=L2 "
                 f"tracks={len(scored)}(H:{n_hostile},F:{n_friendly},U:{n_unknown}) "
-                f"sel={state.selected_track_id} "
+                f"sel={state.selected_track_id} aim=[{aim_str}] "
                 f"cmds={commands_str} reason={reason_str} fps={fps:6.1f} "
                 f"detect={detect_ms:5.2f}ms track={track_ms:5.2f}ms tick={tick_ms:5.2f}ms"
             )

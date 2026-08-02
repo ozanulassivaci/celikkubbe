@@ -30,7 +30,9 @@ from celikkubbe.core.types import (
     Stage,
     SystemState,
 )
-from celikkubbe.demos.pipeline import stub_aim_solutions
+from celikkubbe.geometry.ballistics import DEFAULT_BALLISTIC_TABLE
+from celikkubbe.geometry.frames import DEFAULT_TURRET_GEOMETRY
+from celikkubbe.geometry.solver import AimSolver
 from celikkubbe.io.sim_link import SimTurretLink
 from celikkubbe.tracking.manager import TrackManager
 from celikkubbe.vision.l2_color import ColorDetector
@@ -47,10 +49,11 @@ _SELF_TEST = SelfTestResult(
 
 
 class _Rig:
-    """The same detect -> track -> prioritise -> aim -> gate -> fire
-    wiring demos/pipeline.py's run() assembles, but driven by an injected
-    FakeClock instead of SystemClock + real-time pacing, so a test can
-    advance time instantly and land an injection on an exact tick.
+    """The same detect -> track -> prioritise -> aim (via the real
+    geometry.solver.AimSolver) -> gate -> fire wiring demos/pipeline.py's
+    run() assembles, but driven by an injected FakeClock instead of
+    SystemClock + real-time pacing, so a test can advance time instantly
+    and land an injection on an exact tick.
     """
 
     def __init__(self, clock: FakeClock, num_targets: int = 1) -> None:
@@ -68,6 +71,7 @@ class _Rig:
         # OPERATIONAL until both homing bits are set).
         self.turret.send(Zero(Axis.PAN, 0.0))
         self.turret.send(Zero(Axis.TILT, 0.0))
+        self.aim_solver = AimSolver(DEFAULT_TURRET_GEOMETRY, DEFAULT_BALLISTIC_TABLE)
         self.state = SystemState(
             stage=Stage.STAGE_2,
             mode=Mode.M1_INIT,
@@ -124,7 +128,7 @@ class _Rig:
         for cmd in mode_commands:
             self.turret.send(cmd)
 
-        aim_solutions = stub_aim_solutions(scored, frame.intrinsics)
+        aim_solutions = self.aim_solver.solve_all(scored, frame.intrinsics)
         hit_result = None
         if self.turret.ammo_fired > self._last_ammo_fired:
             hit_result = HitResult.KILL
@@ -162,12 +166,24 @@ class _Rig:
 def test_full_loop_detects_tracks_aims_gates_and_fires_on_a_hostile_target() -> None:
     rig = _Rig(FakeClock())
 
-    rig.run_ticks(60)
+    # Run tick-by-tick rather than a fixed count: the real (geometrically
+    # correct) AimSolver converges on SETPOINT_ACK faster than the old
+    # bearing-only stub did, so exactly how many engagement cycles fit in
+    # a fixed tick budget is not a stable thing to assert on -- what
+    # matters is that a shot lands and the state machine then cycles back
+    # toward search, whenever that happens to occur.
+    cycled_back_after_firing = False
+    for _ in range(90):
+        rig.tick()
+        if rig.turret.ammo_fired >= 1 and rig.state.engagement in (
+            EngagementState.S1_SEARCH,
+            EngagementState.S2_ACQUIRE,
+        ):
+            cycled_back_after_firing = True
+            break
 
     assert rig.turret.ammo_fired >= 1
-    assert any(
-        rig.state.engagement is s for s in (EngagementState.S1_SEARCH, EngagementState.S2_ACQUIRE)
-    )  # cycled back around after the shot
+    assert cycled_back_after_firing
 
 
 def test_estop_injected_mid_slew_stops_motion_and_drives_mode_to_m4() -> None:
