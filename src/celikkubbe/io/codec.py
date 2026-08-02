@@ -30,6 +30,7 @@ from celikkubbe.core.commands import (
     SetMode,
     SetParam,
     SoftEstop,
+    Stop,
     Zero,
 )
 from celikkubbe.core.protocols import Clock
@@ -93,6 +94,8 @@ def _command_payload(cmd: Command) -> dict[str, object]:
             "dir": cmd.direction,
             "speed": round(cmd.speed_dps, 2),
         }
+    if isinstance(cmd, Stop):
+        return {"cmd": "stop"}
     if isinstance(cmd, Home):
         return {"cmd": "home", "axes": _axes_to_wire(cmd.axes)}
     if isinstance(cmd, Zero):

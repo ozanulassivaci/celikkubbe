@@ -32,6 +32,14 @@ class Jog:
 
 
 @dataclass(frozen=True)
+class Stop:
+    """Decelerate both axes to rest. Needed for manual jog: releasing a
+    direction button in the GUI must stop the motion, and heartbeats alone
+    never do that -- they only keep the link alive.
+    """
+
+
+@dataclass(frozen=True)
 class Home:
     axes: tuple[Axis, ...]
 
@@ -77,4 +85,4 @@ class Zero:
     value_deg: float
 
 
-Command = SetMode | Goto | Jog | Home | Zero | Arm | Disarm | Fire | SoftEstop | SetParam
+Command = SetMode | Goto | Jog | Stop | Home | Zero | Arm | Disarm | Fire | SoftEstop | SetParam

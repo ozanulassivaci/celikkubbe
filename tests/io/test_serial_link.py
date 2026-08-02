@@ -6,7 +6,7 @@ from unittest.mock import patch
 import serial
 
 from celikkubbe.core.clock import FakeClock
-from celikkubbe.core.commands import Arm
+from celikkubbe.core.commands import Arm, Stop
 from celikkubbe.io import codec
 from celikkubbe.io.serial_link import SerialTurretLink, find_port
 
@@ -96,6 +96,14 @@ def test_send_encodes_and_writes_command() -> None:
         link.send(Arm())
     assert len(fake.written) == 1
     assert fake.written[0].startswith(b'{"cmd":"arm"')
+
+
+def test_send_stop_writes_stop_frame() -> None:
+    fake = _FakeSerial("/dev/ttyUSB0", 921600)
+    with patch("celikkubbe.io.serial_link.serial.Serial", return_value=fake):
+        link = SerialTurretLink(FakeClock(), port="/dev/ttyUSB0")
+        link.send(Stop())
+    assert fake.written[0].startswith(b'{"cmd":"stop"')
 
 
 def test_send_heartbeat_writes_hb_frame() -> None:

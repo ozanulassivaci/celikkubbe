@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import dataclasses
 
-from celikkubbe.core.commands import Arm, Disarm, Fire, Goto, SetMode, SoftEstop
+from celikkubbe.core.commands import Arm, Disarm, Fire, Goto, SetMode, SoftEstop, Stop
 from celikkubbe.core.types import Mode
 
 
@@ -26,3 +26,10 @@ def test_goto_holds_all_fields() -> None:
 def test_fire_and_estop_are_distinct_types() -> None:
     assert Fire(count=1) != SoftEstop()
     assert Arm() != Disarm()
+
+
+def test_stop_is_frozen_and_has_no_fields() -> None:
+    cmd = Stop()
+    assert dataclasses.is_dataclass(cmd)
+    assert cmd == Stop()
+    assert not dataclasses.fields(cmd)

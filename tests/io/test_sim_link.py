@@ -13,6 +13,7 @@ from celikkubbe.core.commands import (
     SetMode,
     SetParam,
     SoftEstop,
+    Stop,
     Zero,
 )
 from celikkubbe.core.types import Axis, Mode
@@ -232,6 +233,42 @@ def test_jog_moves_continuously_toward_the_limit() -> None:
     link.send(Jog(Axis.TILT, 1, 5.0))
     telem = _run(link, clock, 1.0)
     assert telem.tilt_deg == pytest.approx(5.0, abs=0.5)
+
+
+def test_stop_halts_a_goto_in_progress() -> None:
+    clock = FakeClock()
+    link = SimTurretLink(clock)
+    link.send(Goto(100.0, 30.0, 10.0, 10.0))
+    clock.advance(0.1)
+    link.poll()
+
+    link.send(Stop())
+    telem = link.poll()
+
+    assert telem.motion_complete is True
+    assert telem.pan_vel_dps == 0.0
+    assert telem.tilt_vel_dps == 0.0
+    pan_after_stop = telem.pan_deg
+
+    clock.advance(1.0)
+    telem = link.poll()
+    assert telem.pan_deg == pan_after_stop  # stayed put, did not resume toward 100.0
+
+
+def test_stop_cancels_a_jog() -> None:
+    clock = FakeClock()
+    link = SimTurretLink(clock)
+    link.send(Jog(Axis.TILT, 1, 20.0))
+    clock.advance(0.2)
+    link.poll()
+
+    link.send(Stop())
+    telem = link.poll()
+    tilt_after_stop = telem.tilt_deg
+
+    clock.advance(0.5)
+    telem = link.poll()
+    assert telem.tilt_deg == tilt_after_stop
 
 
 def test_zero_declares_current_position_and_resets_backlash() -> None:

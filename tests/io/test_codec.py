@@ -16,6 +16,7 @@ from celikkubbe.core.commands import (
     SetMode,
     SetParam,
     SoftEstop,
+    Stop,
     Zero,
 )
 from celikkubbe.core.types import Axis, Mode
@@ -158,6 +159,11 @@ def test_encode_fire() -> None:
 def test_encode_set_param() -> None:
     payload, _ = _split_frame(codec.encode_command(SetParam("trigger_pulse_ms", 60.0), seq=8))
     assert payload == {"cmd": "param", "id": "trigger_pulse_ms", "v": 60.0, "seq": 8}
+
+
+def test_encode_stop() -> None:
+    payload, _ = _split_frame(codec.encode_command(Stop(), seq=9))
+    assert payload == {"cmd": "stop", "seq": 9}
 
 
 def test_encode_heartbeat() -> None:

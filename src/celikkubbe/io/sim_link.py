@@ -33,6 +33,7 @@ from celikkubbe.core.commands import (
     SetMode,
     SetParam,
     SoftEstop,
+    Stop,
     Zero,
 )
 from celikkubbe.core.protocols import Clock
@@ -355,6 +356,8 @@ class SimTurretLink:
             self._handle_goto(now, cmd)
         elif isinstance(cmd, Jog):
             self._handle_jog(cmd)
+        elif isinstance(cmd, Stop):
+            self._handle_stop(now)
         elif isinstance(cmd, Zero):
             self._handle_zero(cmd)
         elif isinstance(cmd, Arm):
@@ -421,6 +424,16 @@ class SimTurretLink:
         lo, hi = config.PAN_LIMIT_DEG if cmd.axis is Axis.PAN else config.TILT_LIMIT_DEG
         speed = cmd.direction * cmd.speed_dps
         axis.start_move(self._clock.now(), hi if speed > 0 else lo, abs(speed) or 1e-6, 1e9)
+        self.last_ack = AckResult.OK
+
+    def _handle_stop(self, now: float) -> None:
+        # "Decelerate to rest" simplified to an immediate stop at the
+        # current position: jog itself already uses a near-infinite amax
+        # (see _handle_jog), so there is no real deceleration curve to
+        # match here either. Also cancels any in-progress Goto, including
+        # a pending backlash-overshoot leg.
+        self._pan.start_move(now, self._pan.position_deg, 1.0, 1.0)
+        self._tilt.start_move(now, self._tilt.position_deg, 1.0, 1.0)
         self.last_ack = AckResult.OK
 
     def _handle_zero(self, cmd: Zero) -> None:
