@@ -25,8 +25,9 @@ _OVERLAY_BG = QColor(0, 0, 0, 190)
 
 class SelfTestOverlay(QWidget):
     retry_requested = pyqtSignal()
+    skip_requested = pyqtSignal()
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(self, dev_mode: bool = False, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.current_items: tuple[SelfTestItem, ...] = ()
 
@@ -40,10 +41,23 @@ class SelfTestOverlay(QWidget):
         self._rows_layout = QVBoxLayout()
         outer.addLayout(self._rows_layout)
 
+        buttons_row = QHBoxLayout()
         retry_button = QPushButton(UI_LABEL_TR["RETRY"])
         retry_button.setProperty("role", "primary")
         retry_button.clicked.connect(self.retry_requested.emit)
-        outer.addWidget(retry_button, alignment=Qt.AlignmentFlag.AlignHCenter)
+        buttons_row.addWidget(retry_button)
+
+        # Enabled only in dev_mode: this is the field-testing escape hatch
+        # for a self-test that cannot naturally pass without real turret
+        # hardware (see modes.step's own dev_mode docstring) -- disabled
+        # (not hidden) at the competition so its presence is not itself a
+        # surprise the first time dev_mode is ever turned on.
+        skip_button = QPushButton(UI_LABEL_TR["SKIP_SELF_TEST"])
+        skip_button.setEnabled(dev_mode)
+        skip_button.clicked.connect(self.skip_requested.emit)
+        buttons_row.addWidget(skip_button)
+        outer.addLayout(buttons_row)
+        outer.setAlignment(buttons_row, Qt.AlignmentFlag.AlignHCenter)
         outer.addStretch(1)
 
     def set_result(self, result: SelfTestResult | None) -> None:

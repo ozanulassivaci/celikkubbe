@@ -24,6 +24,12 @@ def test_parse_args_defaults():
     assert args.link == "sim"
     assert args.stage == "2"
     assert args.fullscreen is False
+    assert args.dev is False
+
+
+def test_parse_args_dev_flag():
+    args = _parse_args(["--dev"])
+    assert args.dev is True
 
 
 def test_parse_args_video_requires_path():
@@ -78,6 +84,17 @@ def test_build_fullscreen_flag_shows_window_fullscreen(qtbot):
     app, window, worker = build(["--source", "synthetic", "--link", "sim", "--fullscreen"])
     try:
         assert window.isFullScreen()
+    finally:
+        worker.stop()
+        worker.wait(2000)
+        window.close()
+
+
+def test_build_dev_flag_enables_dev_mode_on_worker_and_window(qtbot):
+    app, window, worker = build(["--source", "synthetic", "--link", "sim", "--dev"])
+    try:
+        assert worker.dev_mode
+        assert window._worker.dev_mode
     finally:
         worker.stop()
         worker.wait(2000)

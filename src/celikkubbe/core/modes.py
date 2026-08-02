@@ -49,17 +49,38 @@ def step(
     operator_requested_mode: Mode | None,
     operator_ack_fault: bool,
     now: float,
+    dev_mode: bool = False,
+    operator_skip_self_test: bool = False,
 ) -> tuple[Mode, list[Command]]:
+    """``dev_mode`` is a field-testing escape hatch, never used at the
+    competition: it does not touch anything outside this function (fire/
+    arm gating in engagement.py's SafetyGate is untouched), and only
+    relaxes the three checks that assume a physical turret exists --
+    e-stop/driver-alarm-triggered SAFE entry and the homing gate. Link
+    timeout and camera health still trip M4_SAFE regardless, since those
+    are not about missing hardware, and SimTurretLink (the only link this
+    GUI drives) provides both estop/driver-alarm telemetry and a working
+    homing/zero mechanism on its own without any physical turret at all --
+    dev_mode exists for testing the vision/detection pipeline without
+    wanting to run through that setup first.
+    """
     if mode in (Mode.M2_STANDBY, Mode.M3_OPERATIONAL):
-        if (
-            _estop_active(telemetry)
-            or _link_timed_out(telemetry, now)
-            or _driver_alarm(telemetry)
-            or not camera_healthy
-        ):
+        unsafe = _link_timed_out(telemetry, now) or not camera_healthy
+        if not dev_mode:
+            unsafe = unsafe or _estop_active(telemetry) or _driver_alarm(telemetry)
+        if unsafe:
             return _enter_safe()
 
     if mode is Mode.M1_INIT:
+        # Checked before self_test_result: the self-test still runs and
+        # displays real pass/fail rows in dev_mode (see
+        # PipelineWorker._advance_self_test, unconditional on dev_mode) --
+        # this is purely a manual override for when it cannot naturally
+        # pass without real hardware, not a bypass of running it at all.
+        # (Booting straight into M2_STANDBY without ever entering M1_INIT
+        # is handled by PipelineWorker's own initial state, not here.)
+        if dev_mode and operator_skip_self_test:
+            return Mode.M2_STANDBY, [SetMode(Mode.M2_STANDBY)]
         if self_test_result is None:
             return Mode.M1_INIT, []
         if self_test_result.passed:
@@ -67,7 +88,8 @@ def step(
         return _enter_safe()
 
     if mode is Mode.M2_STANDBY:
-        if operator_requested_mode is Mode.M3_OPERATIONAL and _homed(telemetry):
+        homed = dev_mode or _homed(telemetry)
+        if operator_requested_mode is Mode.M3_OPERATIONAL and homed:
             return Mode.M3_OPERATIONAL, [SetMode(Mode.M3_OPERATIONAL), Arm()]
         return Mode.M2_STANDBY, []
 

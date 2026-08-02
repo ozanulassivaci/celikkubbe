@@ -50,10 +50,36 @@ def test_selftest_overlay_retry_button_emits_signal(qtbot):
     received = []
     overlay.retry_requested.connect(lambda: received.append(True))
 
-    buttons = overlay.findChildren(QPushButton)
-    assert len(buttons) == 1
-    qtbot.mouseClick(buttons[0], Qt.MouseButton.LeftButton)
+    retry_button = _button_labeled(overlay, strings.UI_LABEL_TR["RETRY"])
+    qtbot.mouseClick(retry_button, Qt.MouseButton.LeftButton)
     assert received == [True]
+
+
+def test_selftest_overlay_skip_button_disabled_outside_dev_mode(qapp):
+    overlay = SelfTestOverlay(dev_mode=False)
+    skip_button = _button_labeled(overlay, strings.UI_LABEL_TR["SKIP_SELF_TEST"])
+    assert not skip_button.isEnabled()
+
+
+def test_selftest_overlay_skip_button_enabled_in_dev_mode(qapp):
+    overlay = SelfTestOverlay(dev_mode=True)
+    skip_button = _button_labeled(overlay, strings.UI_LABEL_TR["SKIP_SELF_TEST"])
+    assert skip_button.isEnabled()
+
+
+def test_selftest_overlay_skip_button_emits_signal(qtbot):
+    overlay = SelfTestOverlay(dev_mode=True)
+    qtbot.addWidget(overlay)
+    received = []
+    overlay.skip_requested.connect(lambda: received.append(True))
+
+    skip_button = _button_labeled(overlay, strings.UI_LABEL_TR["SKIP_SELF_TEST"])
+    qtbot.mouseClick(skip_button, Qt.MouseButton.LeftButton)
+    assert received == [True]
+
+
+def _button_labeled(widget: QWidget, text: str) -> QPushButton:
+    return next(b for b in widget.findChildren(QPushButton) if b.text() == text)
 
 
 def test_safe_overlay_shows_reason_code_text(qapp):

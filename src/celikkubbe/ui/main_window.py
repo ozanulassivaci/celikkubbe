@@ -140,7 +140,7 @@ class StatusStrip(QWidget):
     link would otherwise look identical to a live one.
     """
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(self, dev_mode: bool = False, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("statusStrip")
         self.setFixedHeight(_STATUS_STRIP_HEIGHT_PX)
@@ -148,6 +148,13 @@ class StatusStrip(QWidget):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(8, 2, 8, 2)
         layout.setSpacing(14)
+
+        if dev_mode:
+            # Deliberately the first badge, before even the mode badge --
+            # the whole point is that this must be impossible to miss.
+            dev_badge = StatusBadge("DEV", theme.DANGER)
+            dev_badge.setFixedWidth(40)
+            layout.addWidget(dev_badge)
 
         self._mode_badge = StatusBadge("M?", theme.TEXT_DIM)
         self._engagement_badge = StatusBadge("S?", theme.TEXT_DIM)
@@ -272,6 +279,22 @@ def _build_title_bar() -> QFrame:
     return bar
 
 
+def _build_dev_mode_banner() -> QLabel:
+    """A permanent, full-width red strip -- not an overlay, not a toast,
+    never hidden or throttled. dev_mode disables real safety checks (see
+    modes.step's own docstring), so running it unnoticed at the
+    competition would be the worst possible outcome; this banner exists
+    to make that structurally impossible to miss, not just logged.
+    """
+    banner = QLabel(UI_LABEL_TR["DEV_MODE_BANNER"])
+    banner.setAlignment(Qt.AlignmentFlag.AlignCenter)
+    banner.setStyleSheet(
+        f"background-color: {theme.DANGER}; color: {theme.BG_BASE}; "
+        "font-weight: 700; padding: 4px;"
+    )
+    return banner
+
+
 class MainWindow(QMainWindow):
     def __init__(
         self,
@@ -300,6 +323,8 @@ class MainWindow(QMainWindow):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
         outer.addWidget(_build_title_bar())
+        if self._worker.dev_mode:
+            outer.addWidget(_build_dev_mode_banner())
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
         self._left_panel = LeftPanel()
@@ -317,11 +342,12 @@ class MainWindow(QMainWindow):
         splitter.setStretchFactor(2, 0)
         outer.addWidget(splitter, stretch=1)
 
-        self._status_strip = StatusStrip()
+        self._status_strip = StatusStrip(dev_mode=self._worker.dev_mode)
         outer.addWidget(self._status_strip)
 
-        self._selftest_overlay = SelfTestOverlay(self)
+        self._selftest_overlay = SelfTestOverlay(dev_mode=self._worker.dev_mode, parent=self)
         self._selftest_overlay.retry_requested.connect(self._worker.retry_self_test)
+        self._selftest_overlay.skip_requested.connect(self._worker.skip_self_test)
         self._selftest_overlay.hide()
 
         self._safe_overlay = SafeOverlay(self)

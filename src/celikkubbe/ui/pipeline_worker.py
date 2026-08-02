@@ -21,6 +21,7 @@ starting the real thread.
 from __future__ import annotations
 
 import dataclasses
+import logging
 import threading
 import time
 from collections import deque
@@ -66,6 +67,8 @@ from celikkubbe.vision.sources import CameraIntrinsics
 # clock.now(), never against how long this sleep lasted. Same exception
 # already documented for io/link_worker.py's background thread loop.
 _IDLE_SLEEP_S = 0.001
+
+logger = logging.getLogger(__name__)
 
 # Sliding window for the SAFE overlay's event log -- old entries fall off
 # the front rather than growing unbounded over a long session.
@@ -113,12 +116,20 @@ class PipelineWorker(QThread):
         link: TurretLink,
         clock: Clock,
         stage: Stage = Stage.STAGE_2,
+        dev_mode: bool = False,
         parent=None,
     ) -> None:
         super().__init__(parent)
         self._source = source
         self._link = link
         self._clock = clock
+        self._dev_mode = dev_mode
+        if dev_mode:
+            logger.warning(
+                "DEV MODE ENABLED -- self-test is skipped at startup, homing is "
+                "treated as satisfied, and e-stop/driver-alarm no longer trip "
+                "M4_SAFE. Never run this at the competition."
+            )
         self._event_log_lock = threading.Lock()
         self._event_log: deque[tuple[float, EventId, Axis | None]] = deque(maxlen=_EVENT_LOG_MAXLEN)
         self._link_worker = LinkWorker(link, clock, on_event=self._on_link_event)
@@ -138,6 +149,7 @@ class PipelineWorker(QThread):
 
         self._stop_event = threading.Event()
         self._self_test_retry = threading.Event()
+        self._skip_self_test = threading.Event()
         self._ack_fault = threading.Event()
         self._operator_lock = threading.Lock()
         self._operator_input = OperatorInput()
@@ -158,7 +170,12 @@ class PipelineWorker(QThread):
 
         self._state = SystemState(
             stage=stage,
-            mode=Mode.M1_INIT,
+            # dev_mode boots straight into standby -- M1_INIT is never
+            # entered at startup, so the self-test overlay never appears
+            # unless a real fault later sends the system back through
+            # M4_SAFE -> operator_ack_fault (see modes.step's own dev_mode
+            # docstring for why that path still runs a genuine self-test).
+            mode=Mode.M2_STANDBY if dev_mode else Mode.M1_INIT,
             engagement=EngagementState.S1_SEARCH,
             active_layer=Layer.L2,
             layer_manual_override=False,
@@ -226,8 +243,25 @@ class PipelineWorker(QThread):
     def retry_self_test(self) -> None:
         self._self_test_retry.set()
 
+    def skip_self_test(self) -> None:
+        """SelfTestOverlay's GEÇ button -- only takes effect while dev_mode
+        is on (see modes.step's own dev_mode guard); wiring it
+        unconditionally here is harmless since the mode machine itself
+        ignores the request otherwise.
+        """
+        self._skip_self_test.set()
+
     def acknowledge_fault(self) -> None:
         self._ack_fault.set()
+
+    @property
+    def dev_mode(self) -> bool:
+        """Read by MainWindow/StatusStrip/SelfTestOverlay to decide whether
+        to show the permanent dev-mode banner, badge and enable the GEÇ
+        button -- a single source of truth rather than each caller being
+        constructed with its own copy of the flag.
+        """
+        return self._dev_mode
 
     @property
     def latest_snapshot(self) -> UiSnapshot | None:
@@ -380,6 +414,10 @@ class PipelineWorker(QThread):
             self._advance_self_test(telemetry) if self._state.mode is Mode.M1_INIT else None
         )
 
+        skip_self_test = self._skip_self_test.is_set()
+        if skip_self_test:
+            self._skip_self_test.clear()
+
         next_mode, mode_commands = modes.step(
             self._state.mode,
             telemetry,
@@ -388,6 +426,8 @@ class PipelineWorker(QThread):
             operator_requested_mode=None,  # mode-request control lands with the right panel
             operator_ack_fault=ack_fault,
             now=self._clock.now(),
+            dev_mode=self._dev_mode,
+            operator_skip_self_test=skip_self_test,
         )
         self._send(mode_commands)
 

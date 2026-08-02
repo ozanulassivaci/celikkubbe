@@ -304,6 +304,95 @@ def test_retry_self_test_forces_submission_while_still_failing(qtbot):
     assert worker._state.mode is Mode.M4_SAFE
 
 
+# --- dev_mode: field-testing escape hatch ---
+
+
+def test_dev_mode_starts_in_m2_standby_without_running_self_test(qtbot):
+    clock = FakeClock()
+    worker = PipelineWorker(_make_source(clock), SimTurretLink(clock), clock, dev_mode=True)
+
+    assert worker._state.mode is Mode.M2_STANDBY
+    assert worker._state.last_self_test is None
+
+    clock.advance(_TICK_DT)
+    worker._link_worker.tick()
+    worker.tick()
+    assert worker._state.mode is Mode.M2_STANDBY
+    assert worker._state.last_self_test is None
+
+
+def test_dev_mode_reaches_m3_without_homing(qtbot):
+    clock = FakeClock()
+    worker = PipelineWorker(_make_source(clock), SimTurretLink(clock), clock, dev_mode=True)
+
+    clock.advance(_TICK_DT)
+    worker._link_worker.tick()
+    worker.tick()
+    telemetry = worker.latest_snapshot.telemetry
+    assert not telemetry.homed_pan and not telemetry.homed_tilt
+
+    worker._state = dataclasses.replace(worker._state, mode=Mode.M3_OPERATIONAL)
+    clock.advance(_TICK_DT)
+    worker._link_worker.tick()
+    worker.tick()
+    assert worker._state.mode is Mode.M3_OPERATIONAL
+
+
+def test_dev_mode_property_reflects_constructor_flag(qtbot):
+    clock = FakeClock()
+    assert not _make_worker(clock).dev_mode
+    dev_worker = PipelineWorker(_make_source(clock), SimTurretLink(clock), clock, dev_mode=True)
+    assert dev_worker.dev_mode
+
+
+def test_skip_self_test_moves_a_failing_self_test_straight_to_standby(qtbot):
+    clock = FakeClock()
+    source = _make_source(clock)
+    # A link that never answers poll() -- self-test never passes on its
+    # own, so only the GEÇ skip path can reach M2_STANDBY here.
+    worker = PipelineWorker(source, _DeadLink(), clock, dev_mode=True)
+
+    # dev_mode boots straight into M2_STANDBY, but a dead link still trips
+    # M4_SAFE on the very first tick (link timeout is not relaxed by
+    # dev_mode -- see modes.step's own docstring); acknowledging that
+    # fault is what actually lands back in M1_INIT, where a real self-test
+    # runs and, against _DeadLink, can never pass on its own.
+    clock.advance(_TICK_DT)
+    worker.tick()
+    assert worker._state.mode is Mode.M4_SAFE
+
+    worker.acknowledge_fault()
+    clock.advance(_TICK_DT)
+    worker.tick()
+    assert worker._state.mode is Mode.M1_INIT
+
+    clock.advance(_TICK_DT)
+    worker.tick()
+    assert not worker._state.last_self_test.passed
+
+    worker.skip_self_test()
+    clock.advance(_TICK_DT)
+    worker.tick()
+
+    assert worker._state.mode is Mode.M2_STANDBY
+
+
+def test_skip_self_test_has_no_effect_outside_dev_mode(qtbot):
+    clock = FakeClock()
+    source = _make_source(clock)
+    worker = PipelineWorker(source, _DeadLink(), clock, dev_mode=False)
+
+    clock.advance(_TICK_DT)
+    worker.tick()
+    assert worker._state.mode is Mode.M1_INIT
+
+    worker.skip_self_test()
+    clock.advance(_TICK_DT)
+    worker.tick()
+
+    assert worker._state.mode is Mode.M1_INIT
+
+
 class _DeadLink:
     connected = False
 

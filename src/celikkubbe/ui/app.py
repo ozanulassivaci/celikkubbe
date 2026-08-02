@@ -23,6 +23,7 @@ actually runs the event loop and is what ``__main__`` calls.
 from __future__ import annotations
 
 import argparse
+import logging
 import signal
 import sys
 
@@ -43,6 +44,8 @@ from celikkubbe.vision.sources import (
     VideoFileSource,
     WebcamSource,
 )
+
+logger = logging.getLogger(__name__)
 
 _STAGE_FROM_ARG: dict[str, Stage] = {"1": Stage.STAGE_1, "2": Stage.STAGE_2, "3": Stage.STAGE_3}
 
@@ -85,6 +88,13 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         "the module docstring for why the demo's --link stub is not offered here)",
     )
     parser.add_argument("--fullscreen", action="store_true")
+    parser.add_argument(
+        "--dev",
+        action="store_true",
+        help="skip the M1 self-test, treat homing as satisfied, and ignore "
+        "e-stop/driver-alarm for mode transitions -- field testing only, "
+        "never at the competition. Shows a permanent warning banner.",
+    )
     args = parser.parse_args(argv)
     if args.source == "video" and not args.path:
         parser.error("--source video requires --path")
@@ -95,6 +105,13 @@ def build(argv: list[str] | None = None) -> tuple[QApplication, MainWindow, Pipe
     args = _parse_args(argv)
     stage = _STAGE_FROM_ARG[args.stage]
 
+    if args.dev:
+        logger.warning(
+            "DEV MODE ENABLED (--dev) -- self-test is skipped at startup, "
+            "homing is treated as satisfied, and e-stop/driver-alarm no "
+            "longer trip M4_SAFE. Never run this at the competition."
+        )
+
     app = QApplication.instance()
     if app is None:
         app = QApplication(sys.argv)  # pragma: no cover — tests reuse pytest-qt's session qapp
@@ -104,7 +121,7 @@ def build(argv: list[str] | None = None) -> tuple[QApplication, MainWindow, Pipe
     clock = SystemClock()
     source, source_label = _build_source(args, clock)
     link = _build_link(args, clock)
-    worker = PipelineWorker(source, link, clock, stage=stage)
+    worker = PipelineWorker(source, link, clock, stage=stage, dev_mode=args.dev)
     gamepad = GamepadWorker()
     window = MainWindow(worker, source_label=source_label, font_family=font_family, gamepad=gamepad)
 

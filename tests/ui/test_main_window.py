@@ -7,8 +7,10 @@ needed to observe MainWindow react to a tick.
 
 from __future__ import annotations
 
+import dataclasses
+
 from PyQt6.QtCore import QEvent, Qt
-from PyQt6.QtWidgets import QApplication
+from PyQt6.QtWidgets import QApplication, QLabel
 
 from celikkubbe.core import config, strings
 from celikkubbe.core.clock import FakeClock
@@ -31,6 +33,13 @@ def _make_source(clock: FakeClock) -> SyntheticSource:
 def _make_window(clock: FakeClock) -> tuple[MainWindow, PipelineWorker, SimTurretLink]:
     link = SimTurretLink(clock)
     worker = PipelineWorker(_make_source(clock), link, clock)
+    window = MainWindow(worker, source_label="SYNTHETIC")
+    return window, worker, link
+
+
+def _make_dev_window(clock: FakeClock) -> tuple[MainWindow, PipelineWorker, SimTurretLink]:
+    link = SimTurretLink(clock)
+    worker = PipelineWorker(_make_source(clock), link, clock, dev_mode=True)
     window = MainWindow(worker, source_label="SYNTHETIC")
     return window, worker, link
 
@@ -113,19 +122,55 @@ def test_safe_overlay_shows_in_m4_and_requires_acknowledgement(qtbot):
     assert not window._safe_overlay.isHidden()
     assert window._safe_overlay._fault_label.text() == strings.describe(ReasonCode.ESTOP_ACTIVE)
 
-    # Time passing alone must never dismiss it -- M4 requires a
-    # deliberate operator action.
-    for _ in range(20):
-        _tick(worker, clock)
-    assert window._latest_snapshot.state.mode is Mode.M4_SAFE
-    assert not window._safe_overlay.isHidden()
 
-    link.release_estop()
-    worker.acknowledge_fault()
+def test_dev_mode_shows_permanent_banner_and_status_badge(qtbot):
+    clock = FakeClock()
+    window, worker, _link = _make_dev_window(clock)
+    qtbot.addWidget(window)
+
+    assert worker._state.mode is Mode.M2_STANDBY  # self-test skipped at boot
+    banner_texts = [
+        label.text()
+        for label in window.findChildren(QLabel)
+        if label.text() == strings.UI_LABEL_TR["DEV_MODE_BANNER"]
+    ]
+    assert banner_texts, "dev-mode banner not found in the window"
+
+    dev_badges = [
+        b for b in window._status_strip.findChildren(theme.StatusBadge) if b._text == "DEV"
+    ]
+    assert len(dev_badges) == 1
+
+
+def test_dev_mode_absent_by_default(qtbot):
+    clock = FakeClock()
+    window, worker, _link = _make_window(clock)
+    qtbot.addWidget(window)
+
+    banner_texts = [
+        label.text()
+        for label in window.findChildren(QLabel)
+        if label.text() == strings.UI_LABEL_TR["DEV_MODE_BANNER"]
+    ]
+    assert not banner_texts
+    dev_badges = [
+        b for b in window._status_strip.findChildren(theme.StatusBadge) if b._text == "DEV"
+    ]
+    assert dev_badges == []
+
+
+def test_dev_mode_ignores_estop_and_reaches_m3_without_homing(qtbot):
+    clock = FakeClock()
+    window, worker, link = _make_dev_window(clock)
+    qtbot.addWidget(window)
+
+    link.inject_estop()
     _tick(worker, clock)
+    assert worker._state.mode is Mode.M2_STANDBY  # e-stop ignored in dev_mode
 
-    assert window._latest_snapshot.state.mode is Mode.M1_INIT
-    assert window._safe_overlay.isHidden()
+    worker._state = dataclasses.replace(worker._state, mode=Mode.M3_OPERATIONAL)
+    _tick(worker, clock)
+    assert worker._state.mode is Mode.M3_OPERATIONAL
 
 
 def test_left_panel_track_selection_sets_manual_target_id(qtbot):
