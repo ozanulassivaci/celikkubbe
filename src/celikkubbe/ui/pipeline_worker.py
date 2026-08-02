@@ -28,7 +28,7 @@ from collections import deque
 from PyQt6.QtCore import QThread, pyqtSignal
 
 from celikkubbe.core import config, modes, priority
-from celikkubbe.core.commands import Command, Fire, Goto
+from celikkubbe.core.commands import Arm, Command, Disarm, Fire, Goto, Jog, SoftEstop, Stop, Zero
 from celikkubbe.core.engagement import step as engagement_step
 from celikkubbe.core.health import CameraHealth, DepthHealth, DetectionHealth, InferenceHealth
 from celikkubbe.core.protocols import Clock, FrameSource, TurretLink
@@ -143,6 +143,18 @@ class PipelineWorker(QThread):
         self._operator_input = OperatorInput()
         self._snapshot_lock = threading.Lock()
         self._latest_snapshot: UiSnapshot | None = None
+        # Stage/layer changes mutate SystemState, which only this
+        # worker's own thread may write (_tick_inner already does, every
+        # tick, via dataclasses.replace()) -- a GUI-thread caller cannot
+        # write self._state directly without racing that. Recorded here
+        # instead and consumed once at the top of the next _tick_inner,
+        # the same deferred-request pattern set_operator_input already
+        # uses for OperatorInput. Commands (estop/zero/arm/jog/stop) need
+        # no such deferral: LinkWorker.send() is already thread-safe on
+        # its own, so those go straight through from the GUI thread.
+        self._control_lock = threading.Lock()
+        self._requested_stage: Stage | None = None
+        self._requested_layer: Layer | None = None
 
         self._state = SystemState(
             stage=stage,
@@ -182,6 +194,34 @@ class PipelineWorker(QThread):
     def set_operator_input(self, operator_input: OperatorInput) -> None:
         with self._operator_lock:
             self._operator_input = operator_input
+
+    def request_estop(self) -> None:
+        """Sent directly on LinkWorker, not queued behind this worker's
+        own tick loop -- an emergency stop must reach the link the
+        instant the operator presses it, not wait for the next
+        _tick_inner() pass to get around to calling _send().
+        """
+        self._link_worker.send(SoftEstop())
+
+    def request_arm(self, armed: bool) -> None:
+        self._link_worker.send(Arm() if armed else Disarm())
+
+    def request_zero(self, axis: Axis) -> None:
+        self._link_worker.send(Zero(axis, 0.0))
+
+    def request_jog(self, axis: Axis, direction: int, speed_dps: float) -> None:
+        self._link_worker.send(Jog(axis, direction, speed_dps))
+
+    def request_stop(self) -> None:
+        self._link_worker.send(Stop())
+
+    def set_stage(self, stage: Stage) -> None:
+        with self._control_lock:
+            self._requested_stage = stage
+
+    def select_layer(self, layer: Layer) -> None:
+        with self._control_lock:
+            self._requested_layer = layer
 
     def retry_self_test(self) -> None:
         self._self_test_retry.set()
@@ -294,6 +334,7 @@ class PipelineWorker(QThread):
         step_start = self._clock.now()
         with self._operator_lock:
             operator = self._operator_input
+        self._apply_requested_stage_and_layer()
 
         ack_fault = self._ack_fault.is_set()
         if ack_fault:
@@ -435,6 +476,43 @@ class PipelineWorker(QThread):
     def _send(self, commands: list[Command]) -> None:
         for cmd in commands:
             self._link_worker.send(cmd)
+
+    def _apply_requested_stage_and_layer(self) -> None:
+        """Consumes set_stage()/select_layer()'s pending requests, if any,
+        exactly once per tick, on this worker's own thread -- the only
+        thread allowed to write self._state.
+
+        Layer.L3 (Tam Manuel) is a Stage 1-only override (see
+        core/cascade.py's own docstring and select_manual()'s guard): if
+        the operator leaves Stage 1 while it is active, it is cleared
+        back to L2 here rather than leaving an otherwise-unreachable
+        (stage, layer) combination sitting in SystemState. The right
+        panel itself cannot cause this on its own -- L3's mode card is
+        only ever rendered while Stage 1 is selected -- but a stage
+        change and a stale prior layer choice can still combine into it.
+        """
+        with self._control_lock:
+            requested_stage = self._requested_stage
+            self._requested_stage = None
+            requested_layer = self._requested_layer
+            self._requested_layer = None
+
+        if requested_stage is None and requested_layer is None:
+            return
+
+        new_stage = requested_stage if requested_stage is not None else self._state.stage
+        new_layer = requested_layer if requested_layer is not None else self._state.active_layer
+        new_override = self._state.layer_manual_override or requested_layer is not None
+        if new_stage is not Stage.STAGE_1 and new_layer is Layer.L3:
+            new_layer = Layer.L2
+            new_override = True
+
+        self._state = dataclasses.replace(
+            self._state,
+            stage=new_stage,
+            active_layer=new_layer,
+            layer_manual_override=new_override,
+        )
 
     def _solve_crosshair(
         self,

@@ -17,7 +17,7 @@ import pytest
 
 from celikkubbe.core.clock import FakeClock
 from celikkubbe.core.commands import Arm
-from celikkubbe.core.types import Axis, Mode
+from celikkubbe.core.types import Axis, Layer, Mode, Stage
 from celikkubbe.io.sim_link import SimTurretLink
 from celikkubbe.ui.pipeline_worker import PipelineWorker
 from celikkubbe.vision.sources import SyntheticSource, SyntheticSourceConfig, SyntheticTarget
@@ -312,3 +312,116 @@ class _DeadLink:
 
     def poll(self):
         return None
+
+
+# --- right-panel control methods ---
+
+
+def test_request_estop_reaches_the_link_without_a_pipeline_tick(qtbot):
+    """The whole point of request_estop() is that it must not wait for
+    _tick_inner() to get around to calling _send() -- so this deliberately
+    never calls worker.tick() at all, only worker._link_worker.tick() to
+    simulate LinkWorker's own independent background thread having run.
+    """
+    clock = FakeClock()
+    worker = _make_worker(clock)
+    worker.request_estop()
+    worker._link_worker.tick()
+    telemetry = worker._link_worker.latest_telemetry
+    assert telemetry is not None
+    assert telemetry.estop
+
+
+def test_request_arm_and_disarm_toggle_telemetry_armed(qtbot):
+    clock = FakeClock()
+    worker = _make_worker(clock)
+    worker.request_arm(True)
+    worker._link_worker.tick()
+    assert worker._link_worker.latest_telemetry.armed
+
+    worker.request_arm(False)
+    worker._link_worker.tick()
+    assert not worker._link_worker.latest_telemetry.armed
+
+
+def test_request_zero_sets_position_and_homed_flag_for_the_given_axis(qtbot):
+    clock = FakeClock()
+    worker = _make_worker(clock)
+    worker.request_zero(Axis.PAN)
+    worker._link_worker.tick()
+    telemetry = worker._link_worker.latest_telemetry
+    assert telemetry.pan_deg == pytest.approx(0.0)
+    assert telemetry.homed_pan
+    assert not telemetry.homed_tilt
+
+
+def test_request_jog_moves_the_axis_and_request_stop_halts_it(qtbot):
+    clock = FakeClock()
+    worker = _make_worker(clock)
+    worker.request_jog(Axis.PAN, 1, 20.0)
+    worker._link_worker.tick()
+    clock.advance(0.2)
+    worker._link_worker.tick()
+    moved_pan = worker._link_worker.latest_telemetry.pan_deg
+    assert moved_pan > 0.0
+
+    worker.request_stop()
+    worker._link_worker.tick()
+    stopped_pan = worker._link_worker.latest_telemetry.pan_deg
+    clock.advance(0.2)
+    worker._link_worker.tick()
+    assert worker._link_worker.latest_telemetry.pan_deg == pytest.approx(stopped_pan, abs=0.05)
+
+
+def test_set_stage_updates_state_on_the_next_tick(qtbot):
+    clock = FakeClock()
+    worker = _make_worker(clock)
+    assert worker._state.stage is not Stage.STAGE_1
+
+    worker.set_stage(Stage.STAGE_1)
+    clock.advance(_TICK_DT)
+    worker._link_worker.tick()
+    worker.tick()
+
+    assert worker._state.stage is Stage.STAGE_1
+
+
+def test_select_layer_updates_active_layer_and_marks_operator_chosen(qtbot):
+    clock = FakeClock()
+    worker = _make_worker(clock)
+
+    worker.select_layer(Layer.L2)
+    clock.advance(_TICK_DT)
+    worker._link_worker.tick()
+    worker.tick()
+
+    assert worker._state.active_layer is Layer.L2
+    assert worker._state.layer_manual_override is True
+
+
+def test_leaving_stage_1_clears_an_active_l3_override_back_to_l2(qtbot):
+    """L3 (Tam Manuel) is a Stage 1-only override (core/cascade.py's own
+    docstring) -- leaving Stage 1 while it is active must not leave that
+    otherwise-unreachable (stage, layer) combination sitting in
+    SystemState.
+    """
+    clock = FakeClock()
+    worker = _make_worker(clock)
+
+    worker.set_stage(Stage.STAGE_1)
+    clock.advance(_TICK_DT)
+    worker._link_worker.tick()
+    worker.tick()
+    worker.select_layer(Layer.L3)
+    clock.advance(_TICK_DT)
+    worker._link_worker.tick()
+    worker.tick()
+    assert worker._state.active_layer is Layer.L3
+
+    worker.set_stage(Stage.STAGE_2)
+    clock.advance(_TICK_DT)
+    worker._link_worker.tick()
+    worker.tick()
+
+    assert worker._state.stage is Stage.STAGE_2
+    assert worker._state.active_layer is Layer.L2

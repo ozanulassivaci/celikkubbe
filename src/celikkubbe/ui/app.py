@@ -104,7 +104,7 @@ def build(argv: list[str] | None = None) -> tuple[QApplication, MainWindow, Pipe
     source, source_label = _build_source(args, clock)
     link = _build_link(args, clock)
     worker = PipelineWorker(source, link, clock, stage=stage)
-    window = MainWindow(worker, source_label=source_label)
+    window = MainWindow(worker, source_label=source_label, font_family=font_family)
 
     if args.fullscreen:
         window.showFullScreen()

@@ -12,7 +12,7 @@ place, even the ones with no ``ReasonCode`` to key off.
 
 from __future__ import annotations
 
-from celikkubbe.core.types import IFF, ReasonCode, TargetClass, TrackStatus
+from celikkubbe.core.types import IFF, Layer, ReasonCode, Stage, TargetClass, TrackStatus
 
 REASON_CODE_TR: dict[ReasonCode, str] = {
     ReasonCode.NOT_OPERATIONAL: "Sistem operasyonel modda değil",
@@ -80,6 +80,22 @@ UI_LABEL_TR: dict[str, str] = {
     "RECOMMENDATION_ENGAGED": "{cls} ateşlendi, sonuç bekleniyor",
     "EXCLUDED_FRIENDLY": "DOST — otomatik hedef alınamaz",
     "DEFERRED_PREFIX": "ERTELENDİ ({seconds:.0f}s) — {reason}",
+    "ESTOP_BUTTON": "ACİL STOP",
+    "SAFETY_LOCK": "EMNİYET KİLİDİ",
+    "FIRE_BUTTON": "ATIŞ",
+    "SAFETY_WARNING_LOCKED": "EMNİYET KİLİDİ TAKILI",
+    "SAFETY_WARNING_UNLOCKED": "EMNİYET KİLİDİ AÇIK — ATEŞLENEBİLİR",
+    "MODE_CARDS_TITLE": "ALGILAMA KATMANI",
+    "LOCKED_TARGET_TITLE": "KİLİTLİ HEDEF",
+    "MANUAL_CONTROL_TITLE": "MANUEL KONTROL",
+    "HOMING_TITLE": "SIFIRLAMA",
+    "ZERO_PAN": "SIFIRLA PAN",
+    "ZERO_TILT": "SIFIRLA TİLT",
+    "STOP_BUTTON": "DUR",
+    "OPERATOR_CHOSEN": "OPERATÖR",
+    "CASCADE_CHOSEN": "OTOMATİK",
+    "UNAVAILABLE": "YOK",
+    "SPEED_LABEL": "HIZ",
 }
 
 # Self-test item detail templates -- dynamic (interpolated), so kept
@@ -136,4 +152,19 @@ TARGET_CLASS_TR: dict[TargetClass, str] = {
     TargetClass.UAV: "İHA",
     TargetClass.BALLOON: "BALON",
     TargetClass.UNKNOWN: "BİLİNMEYEN",
+}
+
+STAGE_LABEL_TR: dict[Stage, str] = {
+    Stage.STAGE_1: "AŞAMA 1",
+    Stage.STAGE_2: "AŞAMA 2",
+    Stage.STAGE_3: "AŞAMA 3",
+}
+
+# L1/L2/L3 by what they actually are, not the internal Layer enum name --
+# YOLO does not exist yet (see vision/ package docstrings) and L3 is the
+# Stage 1 fully-manual override (see core/cascade.py's own docstring).
+LAYER_LABEL_TR: dict[Layer, str] = {
+    Layer.L1: "YOLO",
+    Layer.L2: "OPENCV",
+    Layer.L3: "TAM MANUEL",
 }

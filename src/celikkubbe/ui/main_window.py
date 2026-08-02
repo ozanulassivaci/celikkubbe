@@ -1,19 +1,19 @@
 """MainWindow: the application shell.
 
-Title bar, three-column splitter (LeftPanel / VideoCanvas / right panel),
+Title bar, three-column splitter (LeftPanel / VideoCanvas / RightPanel),
 the status strip, and the two full-window overlays -- wired to a
-PipelineWorker this window owns. The right panel is still a placeholder;
-it is populated in the next prompt. Nothing in this module reads a
-camera, a serial port, or runs inference -- the GUI thread only ever
-paints and reacts to signals emitted from PipelineWorker's own thread.
+PipelineWorker this window owns. Nothing in this module reads a camera,
+a serial port, or runs inference -- the GUI thread only ever paints and
+reacts to signals emitted from PipelineWorker's own thread.
 """
 
 from __future__ import annotations
 
 import dataclasses
 
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import QEvent, Qt, QTimer
 from PyQt6.QtWidgets import (
+    QApplication,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -26,12 +26,13 @@ from PyQt6.QtWidgets import (
 from celikkubbe import __version__
 from celikkubbe.core import config
 from celikkubbe.core.strings import UI_LABEL_TR
-from celikkubbe.core.types import EngagementState, Layer, Mode, OperatorInput, Track
+from celikkubbe.core.types import EngagementState, Layer, Mode, OperatorInput, Stage, Track
 from celikkubbe.ui import theme
 from celikkubbe.ui.left_panel import LeftPanel
 from celikkubbe.ui.overlays.safe import SafeOverlay
 from celikkubbe.ui.overlays.selftest import SelfTestOverlay
 from celikkubbe.ui.pipeline_worker import PipelineWorker
+from celikkubbe.ui.right_panel import RightPanel
 from celikkubbe.ui.snapshot import UiSnapshot
 from celikkubbe.ui.theme import StatusBadge
 from celikkubbe.ui.video_canvas import VideoCanvas
@@ -223,29 +224,17 @@ def _build_title_bar() -> QFrame:
     return bar
 
 
-def _build_placeholder_panel(title: str) -> QFrame:
-    """Left/right panel content lands in the next prompt; this is just
-    the frame and minimum sizing the splitter needs to lay out correctly.
-    """
-    panel = QFrame()
-    panel.setProperty("role", "panel")
-    layout = QVBoxLayout(panel)
-    label = QLabel(title)
-    label.setStyleSheet(f"color: {theme.TEXT_MUTED};")
-    layout.addWidget(label)
-    layout.addStretch(1)
-    return panel
-
-
 class MainWindow(QMainWindow):
     def __init__(
         self,
         worker: PipelineWorker,
         source_label: str = "",
+        font_family: str = "monospace",
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self._worker = worker
+        self._font_family = font_family
         self._operator_input = OperatorInput()
         self._latest_snapshot: UiSnapshot | None = None
 
@@ -264,11 +253,11 @@ class MainWindow(QMainWindow):
         self._left_panel.setMinimumWidth(220)
         self._canvas = VideoCanvas()
         self._canvas.set_source_label(source_label)
-        right_panel = _build_placeholder_panel("ENGAGEMENT CONTROL")
-        right_panel.setMinimumWidth(220)
+        self._right_panel = RightPanel()
+        self._right_panel.setMinimumWidth(220)
         splitter.addWidget(self._left_panel)
         splitter.addWidget(self._canvas)
-        splitter.addWidget(right_panel)
+        splitter.addWidget(self._right_panel)
         splitter.setSizes([320, 900, 330])
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
@@ -288,8 +277,21 @@ class MainWindow(QMainWindow):
 
         self._canvas.clicked_normalized.connect(self._on_canvas_clicked)
         self._left_panel.track_selected.connect(self._select_track)
+        self._wire_right_panel()
         self._worker.snapshot_ready.connect(self._on_snapshot)
         self._worker.error.connect(self._on_error)
+
+    def _wire_right_panel(self) -> None:
+        panel = self._right_panel
+        panel.estop_requested.connect(self._worker.request_estop)
+        panel.armed_changed.connect(self._worker.request_arm)
+        panel.zero_requested.connect(self._worker.request_zero)
+        panel.jog_pressed.connect(self._worker.request_jog)
+        panel.jog_released.connect(self._worker.request_stop)
+        panel.layer_selected.connect(self._worker.select_layer)
+        panel.stage_selected.connect(self._on_stage_selected)
+        panel.fire_pressed.connect(self._on_fire_pressed)
+        panel.fire_released.connect(self._on_fire_released)
 
     # --- Qt overrides ---
 
@@ -301,6 +303,15 @@ class MainWindow(QMainWindow):
         self._worker.stop()
         self._worker.wait(2000)
         super().closeEvent(event)
+
+    def changeEvent(self, event) -> None:  # noqa: N802 - Qt override
+        super().changeEvent(event)
+        # A jog or fire button held down when the window loses focus (an
+        # alt-tab, a modal dialog stealing activation) must not leave the
+        # turret jogging, or the fire dead-man switch armed, with
+        # nobody's finger actually on the control anymore.
+        if event.type() == QEvent.Type.ActivationChange and not self.isActiveWindow():
+            self._right_panel.force_stop_all()
 
     # --- wiring ---
 
@@ -317,6 +328,7 @@ class MainWindow(QMainWindow):
         self._canvas.set_snapshot(snapshot)
         self._status_strip.update_from_snapshot(snapshot)
         self._left_panel.update_from_snapshot(snapshot)
+        self._right_panel.update_from_snapshot(snapshot)
         self._update_overlays(snapshot)
 
     def _update_overlays(self, snapshot: UiSnapshot) -> None:
@@ -363,6 +375,35 @@ class MainWindow(QMainWindow):
 
     def _select_track(self, track_id: int) -> None:
         self._operator_input = dataclasses.replace(self._operator_input, manual_target_id=track_id)
+        self._worker.set_operator_input(self._operator_input)
+
+    def _on_stage_selected(self, stage: Stage) -> None:
+        self._worker.set_stage(stage)
+        # Accent colour is applied application-wide (see theme.build_qss's
+        # own docstring for why this rebuilds the whole stylesheet rather
+        # than a per-widget override) -- stage changes happen at most a
+        # handful of times per session, so the cost is irrelevant.
+        app = QApplication.instance()
+        if app is not None:
+            app.setStyleSheet(theme.build_qss(theme.accent_for_stage(stage), self._font_family))
+
+    def _on_fire_pressed(self) -> None:
+        # ATIŞ held down is both operator.fire_requested (S4_AIM ->
+        # S5_ENGAGE) and Stage 1's own continuous dead-man switch
+        # (operator.arm_held) -- see engagement.py's module docstring.
+        # Releasing it anytime before the shot is taken must abort back
+        # to S3_TRACK, which armed_by_operator turning False already does
+        # on its own; there is no separate hold-to-arm control in this
+        # GUI build.
+        self._operator_input = dataclasses.replace(
+            self._operator_input, fire_requested=True, arm_held=True
+        )
+        self._worker.set_operator_input(self._operator_input)
+
+    def _on_fire_released(self) -> None:
+        self._operator_input = dataclasses.replace(
+            self._operator_input, fire_requested=False, arm_held=False
+        )
         self._worker.set_operator_input(self._operator_input)
 
     def _find_track_at(self, x_norm: float, y_norm: float) -> Track | None:

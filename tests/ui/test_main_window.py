@@ -7,10 +7,14 @@ needed to observe MainWindow react to a tick.
 
 from __future__ import annotations
 
+from PyQt6.QtCore import QEvent
+from PyQt6.QtWidgets import QApplication
+
 from celikkubbe.core import config, strings
 from celikkubbe.core.clock import FakeClock
-from celikkubbe.core.types import Mode, ReasonCode
+from celikkubbe.core.types import Axis, Layer, Mode, ReasonCode, Stage
 from celikkubbe.io.sim_link import SimTurretLink
+from celikkubbe.ui import theme
 from celikkubbe.ui.main_window import MainWindow
 from celikkubbe.ui.pipeline_worker import PipelineWorker
 from celikkubbe.vision.sources import SyntheticSource, SyntheticSourceConfig
@@ -138,6 +142,105 @@ def test_left_panel_track_selection_sets_manual_target_id(qtbot):
     window._left_panel.track_selected.emit(track_id)
 
     assert window._operator_input.manual_target_id == track_id
+
+
+def test_right_panel_estop_signal_reaches_the_link(qtbot):
+    clock = FakeClock()
+    window, worker, _link = _make_window(clock)
+    qtbot.addWidget(window)
+    _settle_self_test(worker, clock)
+
+    window._right_panel.estop_requested.emit()
+    worker._link_worker.tick()
+
+    assert worker._link_worker.latest_telemetry.estop
+
+
+def test_right_panel_armed_changed_signal_reaches_the_link(qtbot):
+    clock = FakeClock()
+    window, worker, _link = _make_window(clock)
+    qtbot.addWidget(window)
+    _settle_self_test(worker, clock)
+
+    window._right_panel.armed_changed.emit(True)
+    worker._link_worker.tick()
+
+    assert worker._link_worker.latest_telemetry.armed
+
+
+def test_right_panel_zero_and_jog_signals_reach_the_link(qtbot):
+    clock = FakeClock()
+    window, worker, _link = _make_window(clock)
+    qtbot.addWidget(window)
+
+    window._right_panel.jog_pressed.emit(Axis.PAN, 1, 20.0)
+    worker._link_worker.tick()
+    clock.advance(0.2)
+    worker._link_worker.tick()
+    assert worker._link_worker.latest_telemetry.pan_deg > 0.0
+
+    window._right_panel.jog_released.emit()
+    worker._link_worker.tick()
+
+    window._right_panel.zero_requested.emit(Axis.PAN)
+    worker._link_worker.tick()
+    assert worker._link_worker.latest_telemetry.pan_deg == 0.0
+
+
+def test_right_panel_stage_selected_updates_worker_and_app_accent(qtbot):
+    clock = FakeClock()
+    window, worker, _link = _make_window(clock)
+    qtbot.addWidget(window)
+
+    window._right_panel.stage_selected.emit(Stage.STAGE_1)
+    _tick(worker, clock)
+
+    assert worker._state.stage is Stage.STAGE_1
+    app = QApplication.instance()
+    assert theme.ACCENT_A1 in app.styleSheet()
+
+
+def test_right_panel_layer_selected_reaches_the_worker(qtbot):
+    clock = FakeClock()
+    window, worker, _link = _make_window(clock)
+    qtbot.addWidget(window)
+
+    window._right_panel.layer_selected.emit(Layer.L2)
+    _tick(worker, clock)
+
+    assert worker._state.active_layer is Layer.L2
+    assert worker._state.layer_manual_override is True
+
+
+def test_right_panel_fire_press_and_release_updates_operator_input(qtbot):
+    clock = FakeClock()
+    window, worker, _link = _make_window(clock)
+    qtbot.addWidget(window)
+
+    window._right_panel.fire_pressed.emit()
+    assert window._operator_input.fire_requested
+    assert window._operator_input.arm_held
+
+    window._right_panel.fire_released.emit()
+    assert not window._operator_input.fire_requested
+    assert not window._operator_input.arm_held
+
+
+def test_window_deactivation_forces_stop_on_right_panel(qtbot, monkeypatch):
+    clock = FakeClock()
+    window, worker, _link = _make_window(clock)
+    qtbot.addWidget(window)
+    window._right_panel._on_jog_pressed(Axis.PAN, 1)
+    released = []
+    window._right_panel.jog_released.connect(lambda: released.append(True))
+
+    # A real OS/WM activation change cannot be triggered in a headless
+    # test -- isActiveWindow() is monkeypatched instead so changeEvent's
+    # own branch (not just force_stop_all in isolation) is what runs.
+    monkeypatch.setattr(window, "isActiveWindow", lambda: False)
+    window.changeEvent(QEvent(QEvent.Type.ActivationChange))
+
+    assert released == [True]
 
 
 def test_link_loss_visible_in_status_strip_within_stale_threshold(qtbot):
