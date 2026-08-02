@@ -5,11 +5,16 @@ assume familiarity with Python, control systems, and the code itself.
 
 ## Status
 
-Layers built: `core/`, `vision/`, `tracking/`, `io/`, `geometry/`. All
-committed, tested, pushed. 414 tests passing, 97.55% coverage (gate is
-90% in `pyproject.toml`) across `core`/`vision`/`tracking`/`io`/`geometry`/
-`demos`. Next up: the GUI layer — out of scope for every module built so
-far by hard constraint (no Qt below it).
+All layers built: `core/`, `vision/`, `tracking/`, `io/`, `geometry/`,
+`ui/`. All committed, tested, pushed. 632 tests passing (gate is 90% in
+`pyproject.toml`; actual fluctuates ~94-96% run to run — see Testing
+conventions for why) across every package including `ui/`. The GUI was
+built in four parts — shell/threading/theme/canvas; left/right panels
+plus manual control; the HSV tuning window; keyboard/gamepad/click-to-aim
+convergence — see "What `ui/` owns" and "ui/ decisions and why" below.
+Nothing has run against real turret hardware or a physical gamepad yet;
+everything is verified against `SimTurretLink`, synthetic sources, and
+(for the gamepad) a hand-written fake `evdev` device.
 
 ## Project overview
 
@@ -54,13 +59,18 @@ vision/     perception — frame sources, L2 colour detector
 tracking/   Kalman filtering, association, track lifecycle
 io/         PC<->MCU link — wire codec, simulated + real TurretLink, worker
 geometry/   pixel<->angle, parallax, ballistics, aim solving, calibration
+ui/         PyQt6 GUI — shell, panels, tuning window, operator input
 demos/      headless integration (no camera, no STM32, no GUI)
 ```
 
 Non-package top-level dirs: `docs/protocol.md` (the spec above),
-`config/` (calibration JSON, created on first save — empty and untracked
-until then), `tools/` (dev-environment verification scripts, not part of
-the installed package).
+`docs/screenshots/` (GUI reference screenshots, the one deliberate
+exception to the `*.png` gitignore rule), `config/` (calibration JSON
+and HSV tuning presets, created on first save — empty and untracked
+until then; the whole `config/` directory is gitignored), `assets/fonts/`
+(bundled monospace font for `ui/theme.py`'s `load_monospace_font()` —
+empty today, see open questions), `tools/` (dev-environment verification
+scripts, not part of the installed package).
 
 Import direction inside `core/` is strictly one-way:
 
@@ -76,6 +86,15 @@ sibling layers; `io/` does not depend on `vision/` or `geometry/`, nor
 they on it. `demos/` sits on top of everything and is the only place all
 layers plus a `TurretLink` (simulated or, via `--link sim`, the richer
 `SimTurretLink`) are wired together.
+
+`ui/` sits at that same top level, alongside `demos/` — depends on every
+layer below it, nothing below it imports `ui/` — and is the only place
+`PyQt6` (or `evdev`) appears in this codebase, see Hard constraints.
+`ui/pipeline_worker.PipelineWorker` is the GUI's equivalent of
+`demos/pipeline.py`'s own loop: it is what actually wires a
+`FrameSource`, the L2 detector, `TrackManager`, `AimSolver` and a
+`TurretLink` together and runs them one tick at a time, just on a `QThread`
+behind a live window instead of headlessly.
 
 **What each module owns:**
 
@@ -150,12 +169,103 @@ L1/YOLO does not exist yet. `cls` is currently always `None` in the whole
 system (L2 is the only detector). `cascade.py`'s L1 health monitoring has
 nothing real to watch yet.
 
+**What `ui/` owns:**
+
+- `ui/theme.py` — colour tokens, `build_qss()`, and the custom-paint
+  widgets QSS alone can't express (`StatusBadge`, `ToggleSwitch`,
+  `RiskBar`, `AngleGauge`). `load_monospace_font()` falls back to an
+  installed system family, then the generic `"monospace"`, when
+  `assets/fonts/` has no bundled file — true today, see open questions.
+- `ui/snapshot.py` — `UiSnapshot`/`HealthSnapshot`/`PipelineTimings`,
+  the one frozen object `PipelineWorker` hands the GUI thread per tick.
+  `ordered_track_ids` and `engagement_fallback_reason` exist purely so
+  the GUI never has to recompute priority ordering or guess why S4_AIM
+  is stalled — see the aim_solutions rationale above for the identical
+  anti-duplication concern.
+- `ui/pipeline_worker.py` — `PipelineWorker`: the `QThread` owning
+  perception/tracking/decision, one tick at a time. `tick()` is a plain
+  method, not hidden in `run()`, so tests call it directly against a
+  `FakeClock` — same pattern as `io/link_worker.py`. Runs the six-item
+  self-test (M1) and — a real bug this caught — skips `engagement.step()`
+  entirely while self-test is in progress, since engagement runs
+  regardless of Mode by design and would otherwise fight the self-test's
+  own pan/tilt verification move for the link. `detector` and
+  `aim_solver` are exposed as properties so the tuning window and
+  click-to-aim reuse the exact live instances instead of constructing
+  second ones that could silently drift.
+- `ui/video_canvas.py` — the centre widget: frame, boxes, crosshair,
+  lock banner, header/telemetry strips, all `QPainter`-painted over the
+  displayed pixmap, never burned into the frame with OpenCV.
+  `compute_letterbox`/`frame_to_pixmap`/`place_label`/`inset_point`/
+  `place_badge`/`class_label`/`lock_banner_rect`/`indicator_row_top` are
+  pure functions, extracted specifically so paint-adjacent placement
+  math is unit-testable without pixel-sampling.
+- `ui/left_panel.py` — threat level, `RiskBar`, the AI recommendation
+  (`build_recommendation()`, surfacing `engagement.StepResult`'s own
+  `fallback_reason` through `strings.describe()`), classification
+  counts, the target list. Renders in `UiSnapshot.ordered_track_ids`
+  order rather than recomputing one, and throttles to
+  `config.TRACK_LIST_UPDATE_HZ`.
+- `ui/right_panel.py` — stage/layer selection, the manual control pad,
+  speed slider, homing row, and the pinned-bottom safety region (ACİL
+  STOP / EMNİYET KİLİDİ / ATIŞ / warning line) that must never scroll
+  out of reach. `compute_fire_enabled()` is the pure ATIŞ-enablement
+  check; the disabled button's tooltip and the warning line both render
+  its own returned reason, so "why can't I fire" can never drift from
+  the real gate. `jog_speed_dps` is exposed so keyboard jog reuses the
+  operator's own chosen speed instead of a second default.
+- `ui/tuning_window.py` — live HSV tuning. Sliders write straight to
+  the running `PipelineWorker.detector.config` as whole-object swaps
+  (never individual field mutation — see its own docstring on why); the
+  preview re-runs `detect(debug=True)` on fresh snapshots at a throttled
+  10Hz, and only while the dialog is actually visible. Preset
+  persistence (`config_to_dict`/`config_from_dict`/`save_hsv_preset`/
+  `load_hsv_preset`/`list_hsv_presets`) lives in `vision/l2_color.py`,
+  not here — the type being persisted belongs to that module, the same
+  reasoning `geometry/calibration.py` owns `BoresightTable`'s own JSON
+  persistence.
+- `ui/operator_input.py` — `OperatorInputBuilder`: the single point
+  keyboard, gamepad, and GUI-button fire/arm intent converge before
+  reaching `PipelineWorker.set_operator_input()`. Each source reports
+  its own held/not-held state under its own name; `build()` ORs every
+  source together, so one source releasing (a dropped gamepad) can
+  never clear what another is still holding.
+- `ui/gamepad.py` — `GamepadWorker`: a Logitech F310 in XInput mode via
+  `evdev`, on its own thread (`read_loop()` blocks). No device present
+  is not an error — this hardware is optional and most development has
+  none plugged in. A dropped or never-found device forces its own
+  arm/fire state to `False` (Stage 1's RT-released treatment) without
+  touching any other source's state.
+- `ui/main_window.py` — the shell: title bar, three-column splitter,
+  `StatusStrip`, and the self-test/SAFE/help overlays (the tuning window
+  is a separate non-modal `QDialog`, not an overlay). Converges
+  keyboard, an optional passed-in `GamepadWorker`, and canvas clicks
+  into the one `OperatorInputBuilder`. Clicking empty canvas in Stage 1
+  solves a synthetic zero-area `Track` through `PipelineWorker.aim_solver`
+  for a direct `Goto`, so the click still gets ballistic drop and
+  boresight correction rather than a raw bearing.
+- `ui/overlays/selftest.py`, `safe.py`, `help.py` — full-window
+  `QWidget` overlays painted with a semi-transparent backdrop over
+  `centralWidget().rect()`. self-test/SAFE are shown or hidden purely by
+  `Mode`; `help.py` is static content toggled by F1, the only overlay
+  with no `UiSnapshot` involved at all.
+- `ui/app.py` — `python -m celikkubbe.ui.app`. `build()` does
+  everything except run the Qt event loop (so a test can call it
+  without blocking on `app.exec()`); `main()` is the thin wrapper
+  `__main__` calls.
+
 ## Hard constraints
 
 - No `PyQt6`/`PySide6` imports anywhere in `core/` or `io/`.
   `io/link_worker.py`'s own docstring states this explicitly — telemetry,
   events and command outcomes reach the owner through plain callbacks so
   it stays usable headless.
+- `PyQt6` appears **only** in `ui/` — every other package, including
+  `demos/`, stays importable headless. `ui/gamepad.py`'s `evdev` import
+  is not an exception to "hardware access lives in `io/`": a gamepad is
+  operator input, not PC↔MCU communication, so it belongs in `ui/` for
+  the same reason keyboard/mouse handling does, just through `evdev`
+  instead of Qt's own event system.
 - No `pyserial`, `pyrealsense2`, `cv2` imports in `core/` — those belong
   to `vision/`/I-O layers. `vision/` and `tracking/` *are* allowed `cv2`
   and `numpy`; `io/serial_link.py` is allowed `pyserial`; `geometry/` is
@@ -482,8 +592,12 @@ specifically about ballistics.
 **`AimSolution` reports components separately**
 (`lead_az_deg`/`lead_el_deg`, `drop_deg`, `range_m`, `slant_range_m`,
 `confidence`, `warnings`) rather than just the final `az_deg`/`el_deg`.
-Lets a future GUI show the operator *why* the turret is pointing where it
-is, and keeps debugging a bad solve tractable instead of a black box.
+Lets a GUI show the operator *why* the turret is pointing where it is,
+and keeps debugging a bad solve tractable instead of a black box. `ui/`
+does not actually surface this breakdown yet — `left_panel.py`/
+`right_panel.py` show class/confidence/range, not the lead/drop
+components separately — so the capability this was built for is still
+unused, not wrong.
 Pipeline (bbox centre → ray → point at range → angles → lead → drop →
 boresight → clamp) is additive — each correction summed independently,
 not re-derived from a corrected aim point — because every correction is
@@ -503,6 +617,106 @@ estimated-quality intrinsics downgrade even depth-derived range to
 `"low"`, not just size-derived, since the crosshair-placement imprecision
 that implies affects every range source equally; `"medium"` is
 size-derived range with reliable intrinsics; everything else is `"low"`.
+
+## ui/ decisions and why
+
+**`OperatorInputBuilder` ORs sources instead of last-write-wins.**
+Keyboard, gamepad and the right panel's own ATIŞ button can all
+independently want fire/arm held, and none of them know about the
+others. A naive design where each source's handler called
+`PipelineWorker.set_operator_input()` directly would let whichever call
+landed last silently win — releasing a gamepad trigger could un-arm a
+shot the keyboard's space bar is still physically holding down. Instead
+every source reports its own held/not-held state under its own name
+(`"keyboard"`/`"gamepad"`/`"gui"`) to one shared builder; `build()` ORs
+them all. ATIŞ and space bar both set fire *and* arm together (neither
+has a separate hold-to-arm control), but the gamepad's RT and A stay
+independent, since on real hardware they are two different physical
+controls — see `MainWindow._set_fire_and_arm_source` vs
+`_set_fire_source`/`_set_arm_source`.
+
+**EMNİYET KİLİDİ toggles `Telemetry.armed`, not `OperatorInput.arm_held`.**
+These are two different safety layers, both genuinely required in Stage
+1 (`engagement.py` checks both `telemetry.armed`, via `SafetyGate`, and
+`operator.arm_held` independently). EMNİYET KİLİDİ is the master
+safety catch — a toggle, rarely changed, sent as `Arm()`/`Disarm()` —
+while `arm_held` is the continuous per-shot dead-man switch that ATIŞ/
+space itself drives while held. Conflating them into one control would
+lose the fail-safe property that releasing the trigger — independent of
+whatever the master switch is set to — always aborts back to S3.
+
+**Commands split into direct-send and deferred-request, by what they
+touch.** `request_estop`/`request_arm`/`request_zero`/`request_jog`/
+`request_stop`/`request_goto` all call `LinkWorker.send()` straight from
+the GUI thread — safe because `LinkWorker.send()` already takes its own
+lock, and doing this avoids the emergency-stop path ever waiting behind
+`PipelineWorker`'s own tick loop. `set_stage`/`select_layer` cannot do
+this: they mutate `SystemState` fields that only `_tick_inner` may write
+(every other read of `self._state` in that class is itself
+unsynchronised), so they instead record a pending request under a
+dedicated lock, consumed once at the top of the next tick — the same
+deferred-request pattern `set_operator_input` already used. Leaving
+Stage 1 with L3 (Tam Manuel, a Stage 1-only override) still selected
+falls back to L2 there rather than leaving that combination sitting in
+`SystemState`.
+
+**Click-to-aim on empty canvas builds a synthetic `Track`, not a raw
+bearing.** Stage 1, clicking where nothing is detected, still goes
+through `PipelineWorker.aim_solver.solve()` — the same solver every real
+track uses — via a throwaway zero-area `Track` at the click point,
+`range_m=None` (so `AimSolver` substitutes `config.DEFAULT_RANGE_M`
+exactly like it would for any real track with unknown range) and
+`track_id=-1` (never stored, read only transiently by `solve()`). The
+click still benefits from ballistic drop and boresight correction this
+way, which a bare `projection.point_to_angles()` call would skip.
+
+**Tuning window re-runs `detect(debug=True)` itself, throttled and
+visibility-gated.** `PipelineWorker._tick_inner` calls `detect(frame)`
+without `debug=True` on every tick, forever — building `DebugMasks`
+(HSV/morphed masks, per-contour accept/reject detail) has a real cost
+that would otherwise be paid on every frame whether or not anyone is
+tuning. Instead the dialog itself re-runs detection on the same detector
+against fresh snapshots, at 10Hz, and only while `self.isVisible()` —
+closing or hiding it stops the extra work with no separate teardown
+needed.
+
+**Visual QA caught real bugs no test could, repeatedly — treat it as
+load-bearing, not optional.** Concretely, this build: `REASON_CODE_TR`
+was ASCII-transliterated throughout (`degil` for `değil`, etc.) since
+before the GUI existed — nothing had ever displayed it prominently
+enough to notice. The lock banner and the telemetry strip's own
+OPERATOR AKTİF/TAKİP YARDIMI ON row were positioned from two independent
+magic-number offsets and visibly overlapped once a real scene exercised
+both at once. `QGroupBox`/`QScrollArea`/`QComboBox`/`QLineEdit`/
+`QCheckBox` had no rules in `theme.py`'s shared stylesheet at all, since
+nothing before the tuning window ever used them — left unstyled, it was
+light-text-on-light-background, nearly unreadable. A `QLabel` showing a
+long fire-blocked reason centre-clipped illegibly from both ends instead
+of eliding. None of these are the kind of thing a passing test suite
+reveals; all four were found by rendering the real window (usually
+offscreen, via `QT_QPA_PLATFORM=offscreen`) and looking at the result.
+
+**A queued Qt paint event can outlive the widget it was queued for.**
+A widget that calls `update()` (schedules a deferred repaint) and is
+then torn down before Qt's event loop gets around to delivering that
+paint can segfault — `RuntimeError: wrapped C/C++ object ... has been
+deleted` inside `paintEvent`, immediately followed by a hard crash, not
+a catchable Python exception. Hit repeatedly writing `tuning_window`'s
+own tests. Fix: `qtbot.wait(10)` (or `qtbot.waitExposed(widget)` right
+after `.show()`) before a test that touched a shown, paintable widget
+returns, flushing any pending repaint while the widget is still alive
+rather than leaving it queued across teardown into the next test.
+
+**`isHidden()`, never `isVisible()`, for anything not itself a top-level
+window.** `QWidget.isVisible()` also depends on every ancestor's own
+visibility, so it never reads `True` for a widget embedded inside a
+`MainWindow` that is itself never `.show()`n — which every test in this
+codebase does deliberately, to stay headless and fast. Bit
+`_toggle_help_overlay` for real (toggling it twice took the same "show"
+branch both times) before it was caught. `TuningWindow` is the one
+exception that is actually fine to check with `isVisible()`: it is a
+genuine top-level `QDialog`, so its own visibility is never gated by
+`MainWindow`'s.
 
 ## Confirmed hardware facts
 
@@ -566,10 +780,28 @@ All marked `TODO(measurement)` in code — never silently guessed:
 
 ## Open questions / not yet built
 
-- GUI — the actual next layer. Out of scope for every module built so far
-  by hard constraint (no Qt in `core/` or `io/`); `geometry/`'s
-  `AimSolution` reporting components separately was built specifically so
-  a GUI can explain the pointing solution once it exists.
+- `ui/gamepad.py` targets a Logitech F310 in XInput mode (the `xpad`
+  kernel driver's own mapping: `BTN_SOUTH`/`BTN_EAST`, `ABS_X`/`ABS_Y`,
+  `ABS_RZ`) — derived from the F310's published layout, never verified
+  against a physical device, since none exists in this environment. If
+  the pad is left in DirectInput mode ("D" on its back switch), or a
+  different pad entirely is used, none of this is guaranteed to match.
+  Device discovery and event parsing are tested against a hand-written
+  fake `evdev` device instead — the same honestly-flagged gap
+  `io/serial_link.py` already carries for real MCU firmware.
+- `assets/fonts/` has no bundled `.ttf`/`.otf` yet —
+  `theme.load_monospace_font()` falls back to an installed system
+  monospace family (`JetBrains Mono`/`IBM Plex Mono`/`DejaVu Sans Mono`/
+  `Consolas`), then the generic `"monospace"` family, with a logged
+  warning either way. Layout assumes a genuinely monospaced font either
+  way, but glyph metrics (and therefore exact pixel widths in
+  screenshots) will shift once a real bundled font lands.
+- `ui.tuning_window.TuningWindow`'s draggable ROI and HSV
+  save/load/reset all work against `SimTurretLink`/`SyntheticSource`
+  only — never exercised against a real D435i feed, where actual sensor
+  noise, auto-exposure and white balance will make real presets look
+  nothing like the synthetic ones committed today (`config/hsv/` is
+  gitignored, so no presets ship with the repo regardless).
 - `RealSenseSource` — no camera in hand yet.
 - L1/YOLO detection layer — doesn't exist; `cls` is always `None`
   everywhere in the system today. `cascade.py`'s L1 health path is
@@ -604,8 +836,28 @@ All marked `TODO(measurement)` in code — never silently guessed:
   flakiness. Exception noted under Hard constraints
   (`io/link_worker.py`'s background-thread idle sleep, never exercised by
   a test that also checks timing).
-- Coverage gate: `fail_under = 90` in `pyproject.toml`; actual is 97.55%
-  (414 tests) across `core`/`vision`/`tracking`/`io`/`geometry`/`demos`.
+- Coverage gate: `fail_under = 90` in `pyproject.toml`; actual is
+  ~94-96% (632 tests) across every package including `ui/`. The range,
+  not a single number, is real: `theme.ToggleSwitch`'s
+  `QPropertyAnimation` runs on wall-clock time, not `FakeClock`, so how
+  many intermediate animation frames a given test run happens to paint
+  — and therefore exactly which `theme.py` branches get hit — varies
+  slightly with real system load. The test *count* is stable; only
+  coverage of that one file's paint code moves.
+- `ui/` tests use `pytest-qt`'s `qtbot` fixture (no `conftest.py` needed
+  — it is a pytest plugin, not project fixture code) and drive
+  `PipelineWorker` the same way `test_pipeline_worker.py` does:
+  `tick()`/`worker._link_worker.tick()` called directly against a
+  `FakeClock`, never `worker.start()`. `isHidden()`, not `isVisible()`,
+  to check whether an overlay/panel-internal widget is shown — see ui/
+  decisions and why. A widget that calls `update()` and is shown for
+  real needs `qtbot.wait(...)`/`qtbot.waitExposed(...)` before the test
+  returns, or a queued repaint can outlive it into the next test's own
+  setup — also covered there, found via an actual segfault. `evdev` is
+  monkeypatched at the module level (`evdev.list_devices`,
+  `evdev.InputDevice`) for device discovery, and a hand-written fake
+  device (`capabilities()`/`read_loop()`) for event parsing — no
+  physical gamepad exists in this environment.
 - ruff: line length 100, `target-version = "py310"`,
   `select = ["E", "F", "I", "UP", "B"]`. Run `ruff format` too — several
   past commits needed a follow-up formatting pass after edits shortened
@@ -617,7 +869,12 @@ All marked `TODO(measurement)` in code — never silently guessed:
   (`test_solver.py`'s `_make_track`, `test_serial_link.py`'s
   `_FakeSerial`/`_FakePortInfo`, `test_sim_link.py`'s heartbeat-pumping
   `_run` helper) rather than a shared `helpers.py` — each file's needs
-  differed enough that sharing wasn't worth it.
+  differed enough that sharing wasn't worth it. `tests/ui/` does both:
+  imports `tests/factories.py`'s `make_track`/`make_state` for
+  `core.types` objects, but every file that needs a full `UiSnapshot`
+  (which `factories.py` cannot build — it is a `ui/`-only type) defines
+  its own local `_snapshot()`/`_health()`/`_timings()`, each slightly
+  different, rather than one shared `ui/`-specific factories module.
 - Vision/tracking tests use `SyntheticSource` + NumPy-generated frames
   exclusively — nothing depends on a file that might not exist.
   `VideoFileSource`/`WebcamSource` tests mock `cv2.VideoCapture` directly;
