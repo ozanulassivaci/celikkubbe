@@ -422,11 +422,23 @@ class RightPanel(QWidget):
         self, armed: bool, fire_enabled: bool, fire_reason: str | None
     ) -> None:
         if not armed:
-            self._warning_label.setText(UI_LABEL_TR["SAFETY_WARNING_LOCKED"])
-            self._warning_label.setStyleSheet(f"color: {theme.TEXT_DIM};")
+            self._set_warning_text(UI_LABEL_TR["SAFETY_WARNING_LOCKED"], theme.TEXT_DIM, bold=False)
         elif not fire_enabled and fire_reason is not None:
-            self._warning_label.setText(fire_reason)
-            self._warning_label.setStyleSheet(f"color: {theme.WARN};")
+            self._set_warning_text(fire_reason, theme.WARN, bold=False)
         else:
-            self._warning_label.setText(UI_LABEL_TR["SAFETY_WARNING_UNLOCKED"])
-            self._warning_label.setStyleSheet(f"color: {theme.DANGER}; font-weight: 600;")
+            self._set_warning_text(UI_LABEL_TR["SAFETY_WARNING_UNLOCKED"], theme.DANGER, bold=True)
+
+    def _set_warning_text(self, text: str, color: str, bold: bool) -> None:
+        """QLabel never elides overflowing text on its own: left as-is, a
+        reason longer than the panel is wide -- build_recommendation's
+        own "{cls} — {reason}" text runs long -- centre-clips illegibly
+        from both ends instead of truncating cleanly from one (found by
+        looking at a real screenshot, not by any test). The untruncated
+        text stays available as a tooltip.
+        """
+        metrics = self._warning_label.fontMetrics()
+        elided = metrics.elidedText(text, Qt.TextElideMode.ElideRight, self._warning_label.width())
+        self._warning_label.setText(elided)
+        self._warning_label.setToolTip(text)
+        weight = "font-weight: 600;" if bold else ""
+        self._warning_label.setStyleSheet(f"color: {color}; {weight}")
