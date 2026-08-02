@@ -6,7 +6,7 @@ assume familiarity with Python, control systems, and the code itself.
 ## Status
 
 All layers built: `core/`, `vision/`, `tracking/`, `io/`, `geometry/`,
-`ui/`. All committed, tested, pushed. 632 tests passing (gate is 90% in
+`ui/`. All committed, tested, pushed. 671 tests passing (gate is 90% in
 `pyproject.toml`; actual fluctuates ~94-96% run to run — see Testing
 conventions for why) across every package including `ui/`. The GUI was
 built in four parts — shell/threading/theme/canvas; left/right panels
@@ -15,6 +15,15 @@ convergence — see "What `ui/` owns" and "ui/ decisions and why" below.
 Nothing has run against real turret hardware or a physical gamepad yet;
 everything is verified against `SimTurretLink`, synthetic sources, and
 (for the gamepad) a hand-written fake `evdev` device.
+
+Two field-testing fixes landed after the four GUI parts: a `--dev` mode
+that bypasses the self-test/homing/estop gates that otherwise make it
+impossible to run the GUI without a physical turret (see "`--dev` mode"
+below), and four structural noise filters on the L2 colour detector —
+computed `min_area_px`, a per-class detection cap, a solidity filter and
+an aspect-ratio filter — added after a webcam in an ordinary room
+produced dozens of spurious red/blue detections tight HSV thresholds
+alone could not fix (see "vision/ decisions and why").
 
 ## Project overview
 
@@ -131,7 +140,9 @@ behind a live window instead of headlessly.
   `filter_engageable` (permanent FRIENDLY exclusion).
 - `core/cascade.py` — L1/L2/L3 layer selection + recovery monitor.
 - `core/modes.py` — M1–M4 mode machine. M2→M3 now additionally gated on
-  `Telemetry.homed_pan`/`homed_tilt` — see io/ decisions.
+  `Telemetry.homed_pan`/`homed_tilt` — see io/ decisions. `step()` also
+  takes `dev_mode`/`operator_skip_self_test`, a field-testing escape
+  hatch — see "`--dev` mode" below.
 - `core/engagement.py` — S1–S6 engagement machine, `StepResult`.
 - `core/strings.py` — Turkish UI strings keyed by `ReasonCode` (now
   including `NOT_HOMED`). Nothing in decision logic imports this.
@@ -139,6 +150,12 @@ behind a live window instead of headlessly.
   `WebcamSource`. `RealSenseSource` does not exist yet (no camera in hand).
 - `vision/l2_color.py` — `ColorDetector`: the **permanent** L2 fallback,
   not a scaffold. Runs whenever L1/YOLO health degrades.
+  `ColorDetectorConfig.min_area_px` defaults to `None` (computed per
+  frame from optics via `compute_min_area_px`, not a hardcoded pixel
+  count) and three more structural filters — `solidity_min`,
+  `aspect_ratio_range`, `max_detections_per_class` — gate every contour
+  before it can become a `Detection`, on top of the HSV threshold itself.
+  See "vision/ decisions and why" below.
 - `tracking/kalman.py` — `CentroidKalmanFilter` (normalised xy + velocity),
   `RangeKalmanFilter` (separate, idles without a measurement).
 - `tracking/association.py` — `associate()`: IoU cost + Hungarian
@@ -465,6 +482,78 @@ Keeps "never fire without passing every gate" true in exactly one place.
 **M4 SAFE has no automatic exit.** Deliberate safety decision. Only
 `operator_ack_fault=True` moves M4 → M1 for a fresh self-test.
 
+## vision/ decisions and why
+
+**Structural filters, not tighter HSV, fixed L2's false-positive problem.**
+A webcam pointed at an ordinary room produced dozens of red/blue
+detections — tightening hue/saturation thresholds only ever trades false
+positives for false negatives against real targets, because the actual
+gap was that the detector had no constraint at all on a contour's shape
+or count, only its colour. Four independent structural filters were
+added instead, each gating a property no genuine competition target
+violates but noise commonly does:
+
+- **`min_area_px`, computed, not hardcoded.** The old fixed `12` was
+  roughly 60x too permissive — a 50cm model at 15m is ~31px across at
+  720p, ~750px of area. `compute_min_area_px()` derives the floor from
+  the smallest known target (`0.30m`, the drone) at
+  `config.MAX_ENGAGEMENT_RANGE_M` (reusing the same derived constant
+  `priority.py` already uses, rather than inventing a second "how far
+  can this course engage" number): `expected_px = fx * 0.30 /
+  max_range_m`, `min_area_px = expected_px**2 * 0.3` — squared for area,
+  scaled by `0.3` (not `1.0`) so a non-square aircraft silhouette isn't
+  penalised for not filling its own bounding box. `ColorDetectorConfig.
+  min_area_px` defaults to `None` ("auto" — computed every frame from
+  the frame's own intrinsics) rather than removing the field; setting an
+  int overrides it, e.g. a competition-day value tuned by eye against
+  the real venue. `"estimated"`-quality intrinsics (a webcam) have a
+  guessed `fx`, so computing from it would compound one guess with
+  another; the auto path instead falls back to a fixed fraction of frame
+  area (`_MIN_AREA_ESTIMATED_FRAME_FRACTION`), which scales with
+  resolution the same way the reliable-intrinsics formula does (both fx
+  and frame area scale with width² at a fixed FOV and aspect ratio).
+  `ColorDetector` logs the computed floor once per distinct value
+  (cached, not once per frame) so it stays visible without spamming the
+  log at 30Hz. In `ui/tuning_window.py`'s min-area slider, `0` means
+  "auto" (`None`); any value above `0` is an explicit override — the
+  slider's own range had to grow from `1..200` to `0..2000`, since a
+  real D435i's larger `fx` can genuinely compute a floor above the old
+  slider's maximum.
+- **`max_detections_per_class` (default 3).** The course has three lanes
+  and at most three models of one colour; a fourth same-colour detection
+  in one frame is noise that happened to pass every other filter, not a
+  real target. Applied *after* every other structural filter (area,
+  solidity, aspect ratio), sorted by area descending, keeping only the
+  top N — so on a frame with more survivors than the cap, the *largest*
+  contours win, not whichever the contour-scan order happened to reach
+  first.
+- **`solidity_min` (default 0.75), on by default** — unlike
+  `require_circularity`. Solidity (contour area over its own convex hull
+  area) doesn't assume anything about the target's silhouette the way
+  circularity does, so it doesn't share circularity's problem of
+  rejecting a legitimately non-circular aircraft. A solid printed model
+  scores close to `1.0` regardless of shape; scattered shadow patches,
+  specular streaks and fragmented blobs — genuinely concave or
+  disconnected-looking noise — score well below.
+- **`aspect_ratio_range` (default `(0.2, 5.0)`), via `cv2.minAreaRect`.**
+  Rejects long thin colour bands (a strip of wall trim, a doorframe
+  edge) no competition target's silhouette resembles.
+
+All four report their specific rejection reason on `Contour.
+reject_reason` (`"area"`, `"solidity"`, `"aspect_ratio"`,
+`"class_cap"`, plus the pre-existing `"circularity"`) so
+`ui/tuning_window.py`'s contour preview can show *why* a box is red, not
+just that it is. That label is drawn with `cv2.putText` directly on the
+preview image using the raw English slug, not
+`REASON_CODE_TR`/`UI_LABEL_TR`'s Turkish text: OpenCV's Hershey fonts
+cannot render Turkish diacritics (İ/Ş/Ğ/Ü/Ö/Ç come out missing or wrong),
+and a corrupted label would be worse for a tuning tool than an English
+one. The per-class-cap discard count is also reported separately in the
+tuning window's counts label (`SINIF LİMİTİ: N`) from the general
+accepted/rejected counts — a persistently high value there means real
+targets are being discarded by the cap itself, a different problem from
+a too-tight HSV/area/solidity threshold.
+
 ## io/ decisions and why
 
 **Asymmetric protocol, deliberately.** PC→MCU is newline-delimited JSON
@@ -790,6 +879,52 @@ branch both times) before it was caught. `TuningWindow` is the one
 exception that is actually fine to check with `isVisible()`: it is a
 genuine top-level `QDialog`, so its own visibility is never gated by
 `MainWindow`'s.
+
+## `--dev` mode
+
+Field-testing escape hatch (`python -m celikkubbe.ui.app --dev`), never
+for the competition: the GUI otherwise cannot run past M1_INIT without a
+real turret providing genuine homing and clean e-stop/driver-alarm
+telemetry, which blocks testing the vision/detection pipeline alone.
+`PipelineWorker(dev_mode=True)` boots directly into `M2_STANDBY` (the
+self-test never runs at startup at all), and `modes.step()` takes a
+`dev_mode` flag that relaxes exactly three checks — homing for M2→M3,
+and e-stop/driver-alarm for tripping M4_SAFE from M2/M3 — deliberately
+**not** link timeout or camera health, since those aren't about missing
+hardware (`SimTurretLink`, the only link this GUI drives, simulates
+e-stop/driver-alarm/homing fully in software; a genuinely dead link or
+camera is a real problem `dev_mode` must not mask).
+
+A second, independent mechanism covers the case where the system lands
+back in `M1_INIT` anyway (a real fault trips M4_SAFE — link timeout,
+camera health, or, outside `dev_mode`, e-stop/driver-alarm — and the
+operator acknowledges it): a genuine self-test runs there and displays
+real pass/fail rows, since against `_DeadLink`-style non-cooperative
+links or no real turret it may never pass on its own. `SelfTestOverlay`
+gained a **GEÇ** (skip) button, enabled only when `dev_mode` is on,
+which calls `PipelineWorker.skip_self_test()` — `modes.step()` honours
+`operator_skip_self_test` unconditionally on the next tick, moving
+straight to `M2_STANDBY` regardless of `self_test_result`. The existing
+**TEKRAR DENE** (retry) button is a different, always-available
+mechanism with the opposite effect: it forces conclusion of the
+*current* self-test attempt, which trips `M4_SAFE` if it's still
+failing — GEÇ bypasses that outcome entirely, TEKRAR DENE does not.
+
+Safety requirement, not a suggestion: `dev_mode` must be impossible to
+miss. `MainWindow` shows a permanent red banner
+(`GELİŞTİRME MODU — EMNİYET KONTROLLERİ DEVRE DIŞI`) between the title
+bar and the splitter — a real widget, not a toast or overlay that could
+be dismissed or time out — plus a `"DEV"` `StatusBadge` as the *first*
+badge in the status strip, before even the mode badge. Both are
+constructed once from `PipelineWorker.dev_mode` (a read-only property,
+the single source of truth every dev_mode-aware widget reads instead of
+each caller carrying its own copy of the flag) and never toggle at
+runtime — `dev_mode` is fixed for the process's lifetime, set only from
+the `--dev` CLI flag. `ui/app.py` also logs a warning at startup, and
+`PipelineWorker.__init__` logs its own warning independently, so the
+condition is visible in the log even if a caller constructs
+`PipelineWorker` directly (as every test in this codebase does) without
+going through `app.py` at all.
 
 ## Confirmed hardware facts
 
