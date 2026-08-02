@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
 Intel RealSense D435i - Tak-Calistir Test Betigi
 
@@ -61,12 +60,15 @@ ctx = rs.context()
 cihazlar = ctx.query_devices()
 
 if len(cihazlar) == 0:
-    rapor("Cihaz algilandi", False,
-          "Kamera bulunamadi. Kontrol listesi:\n"
-          "  - USB kablosu takili mi (MAVI/USB 3.0 porta)\n"
-          "  - lsusb | grep -i intel   -> gorunuyorsa udev sorunu\n"
-          "  - groups                  -> plugdev listede mi\n"
-          "  - Baska bir uygulama kamerayi tutuyor olabilir")
+    rapor(
+        "Cihaz algilandi",
+        False,
+        "Kamera bulunamadi. Kontrol listesi:\n"
+        "  - USB kablosu takili mi (MAVI/USB 3.0 porta)\n"
+        "  - lsusb | grep -i intel   -> gorunuyorsa udev sorunu\n"
+        "  - groups                  -> plugdev listede mi\n"
+        "  - Baska bir uygulama kamerayi tutuyor olabilir",
+    )
     print(f"\n{R}Test durduruldu.{X}\n")
     sys.exit(1)
 
@@ -85,20 +87,24 @@ seri = bilgi(rs.camera_info.serial_number)
 fw = bilgi(rs.camera_info.firmware_version)
 usb = bilgi(rs.camera_info.usb_type_descriptor)
 
-rapor("Cihaz algilandi", True,
-      f"model    : {ad}\n"
-      f"seri no  : {seri}\n"
-      f"firmware : {fw}")
+rapor("Cihaz algilandi", True, f"model    : {ad}\n" f"seri no  : {seri}\n" f"firmware : {fw}")
 
 # --------------------------------------------------------------------
 # 2. USB surumu - KRITIK
 # --------------------------------------------------------------------
 usb3 = usb.startswith("3")
-rapor("USB 3.x baglantisi", usb3,
-      f"USB {usb}" + ("" if usb3 else
-                      "\nDIKKAT: USB 2.1'de cozunurluk ve FPS ciddi dusuyor.\n"
-                      "Kabloyu MAVI porta tak veya kabloyu degistir.\n"
-                      "Uzatma kablosu kullaniyorsan AKTIF (repeater) olmali."))
+rapor(
+    "USB 3.x baglantisi",
+    usb3,
+    f"USB {usb}"
+    + (
+        ""
+        if usb3
+        else "\nDIKKAT: USB 2.1'de cozunurluk ve FPS ciddi dusuyor.\n"
+        "Kabloyu MAVI porta tak veya kabloyu degistir.\n"
+        "Uzatma kablosu kullaniyorsan AKTIF (repeater) olmali."
+    ),
+)
 
 # --------------------------------------------------------------------
 # 3. Sensorler
@@ -113,9 +119,11 @@ try:
             isimler.append("?")
     imu_var = any("Motion" in i for i in isimler)
     rapor("Sensorler listelendi", True, "\n".join(isimler))
-    rapor("IMU modulu (D435i)", imu_var,
-          "Motion Module bulundu" if imu_var else
-          "Motion Module YOK - bu D435 olabilir, D435i degil")
+    rapor(
+        "IMU modulu (D435i)",
+        imu_var,
+        "Motion Module bulundu" if imu_var else "Motion Module YOK - bu D435 olabilir, D435i degil",
+    )
 except Exception as e:
     rapor("Sensorler listelendi", False, e)
 
@@ -125,8 +133,7 @@ except Exception as e:
 try:
     depth_sensor = dev.first_depth_sensor()
     olcek = depth_sensor.get_depth_scale()
-    rapor("Derinlik olcegi", True,
-          f"{olcek} m/birim  (ham deger x {olcek} = metre)")
+    rapor("Derinlik olcegi", True, f"{olcek} m/birim  (ham deger x {olcek} = metre)")
 except Exception as e:
     rapor("Derinlik olcegi", False, e)
 
@@ -161,8 +168,7 @@ try:
 
     gecen = time.perf_counter() - t0
     fps = n / gecen
-    rapor("Akis testi (640x480 @30)", fps > 25,
-          f"{n} kare / {gecen:.1f} s  =  {fps:.1f} FPS")
+    rapor("Akis testi (640x480 @30)", fps > 25, f"{n} kare / {gecen:.1f} s  =  {fps:.1f} FPS")
 except Exception as e:
     rapor("Akis testi", False, e)
 
@@ -177,11 +183,14 @@ if son_derinlik:
         gecerli = np.count_nonzero(dizi) / dizi.size * 100
 
         ok = gecerli > 30
-        rapor("Derinlik verisi", ok,
-              f"cozunurluk    : {w}x{h}\n"
-              f"merkez mesafe : {merkez:.3f} m\n"
-              f"gecerli piksel: %{gecerli:.1f}"
-              + ("" if ok else "\nDusuk oran: cok yakin/parlak yuzey veya lens kapali olabilir"))
+        rapor(
+            "Derinlik verisi",
+            ok,
+            f"cozunurluk    : {w}x{h}\n"
+            f"merkez mesafe : {merkez:.3f} m\n"
+            f"gecerli piksel: %{gecerli:.1f}"
+            + ("" if ok else "\nDusuk oran: cok yakin/parlak yuzey veya lens kapali olabilir"),
+        )
     except Exception as e:
         rapor("Derinlik verisi", False, e)
 
@@ -196,17 +205,18 @@ if son_derinlik:
             "actual_exposure": rs.frame_metadata_value.actual_exposure,
             "gain_level": rs.frame_metadata_value.gain_level,
         }
-        destekli = [k for k, v in alanlar.items()
-                    if son_derinlik.supports_frame_metadata(v)]
+        destekli = [k for k, v in alanlar.items() if son_derinlik.supports_frame_metadata(v)]
 
         if destekli:
-            rapor("Donanim metadata", None,
-                  "Mevcut: " + ", ".join(destekli) + "\nDKMS gerekmiyor.")
+            rapor("Donanim metadata", None, "Mevcut: " + ", ".join(destekli) + "\nDKMS gerekmiyor.")
         else:
-            rapor("Donanim metadata", None,
-                  "Yok - cekirdek yamasi (librealsense2-dkms) kurulmadigi icin normal.\n"
-                  "Kalman icin kare varis zamanini kullan.\n"
-                  "Donanim zaman damgasi gerekirse DKMS + MOK kaydi yapilabilir.")
+            rapor(
+                "Donanim metadata",
+                None,
+                "Yok - cekirdek yamasi (librealsense2-dkms) kurulmadigi icin normal.\n"
+                "Kalman icin kare varis zamanini kullan.\n"
+                "Donanim zaman damgasi gerekirse DKMS + MOK kaydi yapilabilir.",
+            )
     except Exception as e:
         rapor("Donanim metadata", None, e)
 
@@ -238,10 +248,13 @@ if profile:
     try:
         cp = profile.get_stream(rs.stream.color).as_video_stream_profile()
         i = cp.get_intrinsics()
-        rapor("Kamera ic parametreleri", True,
-              f"fx={i.fx:.1f}  fy={i.fy:.1f}\n"
-              f"cx={i.ppx:.1f}  cy={i.ppy:.1f}\n"
-              f"model: {i.model}")
+        rapor(
+            "Kamera ic parametreleri",
+            True,
+            f"fx={i.fx:.1f}  fy={i.fy:.1f}\n"
+            f"cx={i.ppx:.1f}  cy={i.ppy:.1f}\n"
+            f"model: {i.model}",
+        )
     except Exception as e:
         rapor("Kamera ic parametreleri", False, e)
 
@@ -251,10 +264,12 @@ if profile:
 if KAYDET and son_renk and son_derinlik:
     try:
         import cv2
+
         renk = np.asanyarray(son_renk.get_data())
         derin = np.asanyarray(son_derinlik.get_data())
         renkli_derinlik = cv2.applyColorMap(
-            cv2.convertScaleAbs(derin, alpha=0.03), cv2.COLORMAP_JET)
+            cv2.convertScaleAbs(derin, alpha=0.03), cv2.COLORMAP_JET
+        )
         birlesik = np.hstack((renk, renkli_derinlik))
         cv2.imwrite("kamera_ornek.png", birlesik)
         rapor("Ornek goruntu kaydedildi", True, "kamera_ornek.png (sol: RGB, sag: derinlik)")
@@ -293,10 +308,13 @@ try:
 
     if accel and gyro:
         buyukluk = (accel.x**2 + accel.y**2 + accel.z**2) ** 0.5
-        rapor("IMU verisi", 8.0 < buyukluk < 11.5,
-              f"ivme  : x={accel.x:+.2f}  y={accel.y:+.2f}  z={accel.z:+.2f}  |g|={buyukluk:.2f} m/s2\n"
-              f"jiro  : x={gyro.x:+.3f}  y={gyro.y:+.3f}  z={gyro.z:+.3f} rad/s\n"
-              f"(kamera sabitken |g| ~9.81 olmali)")
+        ivme = f"ivme: x={accel.x:+.2f} y={accel.y:+.2f} z={accel.z:+.2f} |g|={buyukluk:.2f} m/s2"
+        jiro = f"jiro: x={gyro.x:+.3f} y={gyro.y:+.3f} z={gyro.z:+.3f} rad/s"
+        rapor(
+            "IMU verisi",
+            8.0 < buyukluk < 11.5,
+            f"{ivme}\n{jiro}\n(kamera sabitken |g| ~9.81 olmali)",
+        )
     else:
         rapor("IMU verisi", False, "accel/gyro karesi alinamadi")
 except Exception as e:
