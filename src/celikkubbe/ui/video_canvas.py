@@ -202,6 +202,10 @@ class VideoCanvas(QWidget):
         self._snapshot = snapshot
         self._pixmap = frame_to_pixmap(snapshot.frame.image)
         self._recompute_transform()
+        # Not just resizeEvent: the transform first becomes non-empty
+        # here, on the first frame ever received, and resizeEvent may
+        # not fire again for the rest of the session.
+        self._layout_gauges()
         self._update_gauges(snapshot)
         self.update()
 
@@ -258,7 +262,20 @@ class VideoCanvas(QWidget):
         )
 
     def _layout_gauges(self) -> None:
-        strip_top = self.height() - _TELEMETRY_HEIGHT_PX
+        """Anchored to the letterboxed image's own bottom edge, like
+        _draw_telemetry_strip's text -- not the canvas widget's raw
+        bottom, which whenever there is a letterbox margin (e.g. a 4:3
+        frame in a taller-than-4:3 widget) sits well below where the
+        telemetry strip's text is actually drawn, leaving a dead gap
+        between a value and its gauge. Falls back to the widget's own
+        bottom before any frame has ever arrived, when the transform is
+        still empty (offset 0, no displayed area).
+        """
+        if self._pixmap is not None:
+            image_bottom = self._transform.offset_y + self._transform.displayed_h
+        else:
+            image_bottom = self.height()
+        strip_top = int(image_bottom) - _TELEMETRY_HEIGHT_PX
         gauge_w = max(60, self.width() // 3)
         self._pan_gauge.setGeometry(90, strip_top + 8, gauge_w, 12)
         self._tilt_gauge.setGeometry(90, strip_top + 26, gauge_w, 12)
@@ -399,12 +416,22 @@ class VideoCanvas(QWidget):
     def _draw_offscreen_arrow(
         self, painter: QPainter, x: float, y: float, bearing_deg: float, color: QColor
     ) -> None:
+        """(x, y) is already clamped to the image area's own edge (see
+        crosshair_with_indicator), which -- whenever there is no
+        letterbox margin on that side -- coincides exactly with the
+        canvas widget's own boundary too, and Qt clips anything drawn
+        outside a widget's rect. An arrowhead pointing further outward
+        from (x, y) would therefore render entirely off-widget and be
+        invisible exactly when it matters. Instead the tip sits at the
+        anchor and the base trails inward, so the whole shape stays
+        inside the visible canvas regardless of letterboxing.
+        """
         painter.save()
         painter.translate(x, y)
         painter.rotate(bearing_deg)  # clockwise from straight up, matching crosshair_with_indicator
         painter.setBrush(color)
         painter.setPen(Qt.PenStyle.NoPen)
-        arrow = QPolygonF([QPointF(0, -20), QPointF(-6, -10), QPointF(6, -10)])
+        arrow = QPolygonF([QPointF(0, -2), QPointF(-6, 12), QPointF(6, 12)])
         painter.drawPolygon(arrow)
         painter.restore()
 
