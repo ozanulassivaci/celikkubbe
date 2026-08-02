@@ -15,6 +15,7 @@ whether a red blob is a drone or an F-16.
 from __future__ import annotations
 
 import json
+import logging
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -22,7 +23,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from celikkubbe.core.config import MIN_TARGET_PX
+from celikkubbe.core.config import MAX_ENGAGEMENT_RANGE_M, MIN_TARGET_PX
 from celikkubbe.core.types import (
     IFF,
     BoundingBox,
@@ -33,7 +34,24 @@ from celikkubbe.core.types import (
     RangeSource,
 )
 
+logger = logging.getLogger(__name__)
+
 DEPTH_SAMPLE_WINDOW_PX = 5  # odd window sampled around the centroid for depth range
+
+# --- structural noise floor for ColorDetectorConfig.min_area_px, applied
+# whenever it is left at its default None -- see compute_min_area_px. ---
+_MIN_AREA_TARGET_SIZE_M = 0.30  # the drone -- smallest of the three known target sizes
+_MIN_AREA_FRACTION = 0.3  # allows a non-square aircraft silhouette, not a filled square
+# "estimated"-quality intrinsics (a webcam with no calibration) have a
+# guessed fx -- computing the floor from it would compound one guess with
+# another, so this instead falls back to a fixed fraction of frame area.
+# Derived by evaluating the same formula once at the assumed 69-degree HFOV
+# (vision.sources.estimated_intrinsics) against a 1280x720 frame: fx =
+# 640/tan(34.5deg) = 931, expected_px = 931*0.30/15 = 18.6px,
+# area = 18.6**2*0.3 = 104px, fraction = 104/921600 = 0.000113 -- rounded
+# down slightly since the same derivation at other aspect ratios (e.g.
+# 640x480) yields a somewhat smaller fraction.
+_MIN_AREA_ESTIMATED_FRAME_FRACTION = 0.0001
 
 # Repo-root config/ -- runtime tuning data, not the compile-time
 # thresholds in core/config.py. Created on first save; absent entirely
@@ -67,13 +85,32 @@ _DEFAULT_CLASSES: tuple[ColorClass, ...] = (
 class ColorDetectorConfig:
     classes: tuple[ColorClass, ...] = field(default_factory=lambda: _DEFAULT_CLASSES)
     morph_kernel: int = 5
-    min_area_px: int = 12
+    # None -- the structural floor is computed per frame from optics (see
+    # compute_min_area_px), which is what a webcam-vs-D435i, or a change
+    # to the course's engagement range, should actually drive. Set an int
+    # here to override it with a fixed value instead (e.g. a competition-
+    # day preset tuned by eye against the real venue).
+    min_area_px: int | None = None
     circularity_min: float = 0.70
     # Off by default: aircraft silhouettes are not circular (an F-16's
     # circularity sits well below 0.70) and would be rejected by a filter
     # that assumed balloons. Circularity is still computed and reported
     # for the tuning panel either way.
     require_circularity: bool = False
+    # On by default, unlike circularity: a solid printed model scores
+    # around 0.9 regardless of its silhouette (solidity does not assume
+    # anything is round), while scattered shadow patches, specular
+    # streaks and fragmented blobs score well below this.
+    solidity_min: float = 0.75
+    # (short side / long side is never below this, long/short never
+    # above) -- rejects long thin colour bands (a strip of wall trim, a
+    # doorframe edge) that no competition target's silhouette resembles.
+    aspect_ratio_range: tuple[float, float] = (0.2, 5.0)
+    # The course physically cannot present more than three models of one
+    # colour; anything beyond this per class, this frame, made it past
+    # every HSV/area/solidity/aspect-ratio filter but is still noise, not
+    # a real fourth target.
+    max_detections_per_class: int = 3
     roi: BoundingBox | None = None  # normalised (x1, y1, x2, y2)
     known_sizes_m: tuple[float, ...] = (0.30, 0.40, 0.50)
 
@@ -86,7 +123,9 @@ class Contour:
     bbox_px: tuple[int, int, int, int]  # x, y, w, h in full-frame pixels
     area_px: float
     circularity: float
+    solidity: float
     accepted: bool
+    # "area" | "circularity" | "solidity" | "aspect_ratio" | "class_cap"
     reject_reason: str | None = None
 
 
@@ -95,6 +134,24 @@ class DebugMasks:
     hsv_masks: dict[str, np.ndarray]  # class name -> raw HSV threshold mask
     morphed_masks: dict[str, np.ndarray]  # class name -> post-morphology mask
     contours: tuple[Contour, ...]
+
+
+@dataclass(frozen=True)
+class _ContourMetrics:
+    """Internal: every measurement taken for one contour, before the
+    per-class area-descending cap decides which structural survivors are
+    actually kept. Not exposed outside this module -- Contour (above) is
+    the public, tuning-panel-facing record.
+    """
+
+    contour: np.ndarray
+    bbox_px: tuple[int, int, int, int]
+    area: float
+    circularity: float
+    solidity: float
+    rect_w: float
+    rect_h: float
+    reject_reason: str | None
 
 
 def is_under_resolved(
@@ -110,6 +167,38 @@ def is_under_resolved(
     """
     width_px = (bbox[2] - bbox[0]) * intrinsics.width
     return width_px < min_target_px
+
+
+def compute_min_area_px(
+    intrinsics: CameraIntrinsics,
+    max_range_m: float = MAX_ENGAGEMENT_RANGE_M,
+    min_target_size_m: float = _MIN_AREA_TARGET_SIZE_M,
+    area_fraction: float = _MIN_AREA_FRACTION,
+) -> int:
+    """Structural noise floor for accepted contour area, derived from
+    optics rather than guessed.
+
+    A contour genuinely produced by the smallest competition target (the
+    0.30m drone) at the course's own maximum engagement range projects to
+    roughly ``expected_px`` pixels across; squaring that and scaling by
+    ``area_fraction`` (not 1.0) allows for a non-square aircraft
+    silhouette rather than assuming a filled square bounding box. Anything
+    smaller than this floor cannot possibly be a real target at any range
+    the course allows, and is therefore noise (a specular highlight, a
+    shadow fragment, a slice of a red doorframe) regardless of how tight
+    the HSV thresholds are tuned.
+
+    "estimated"-quality intrinsics (a webcam with no calibration -- see
+    CameraIntrinsics.is_reliable) have an ``fx`` that is itself a guess, so
+    computing from it here would compound one guess with another; see
+    _MIN_AREA_ESTIMATED_FRAME_FRACTION's own comment for the fallback used
+    instead, which scales with frame area rather than assuming a fixed
+    pixel count.
+    """
+    if not intrinsics.is_reliable:
+        return round(intrinsics.width * intrinsics.height * _MIN_AREA_ESTIMATED_FRAME_FRACTION)
+    expected_px = intrinsics.fx * min_target_size_m / max_range_m
+    return round((expected_px**2) * area_fraction)
 
 
 def _depth_range_m(depth: np.ndarray, cx_px: int, cy_px: int, window: int) -> float | None:
@@ -140,12 +229,14 @@ class ColorDetector:
 
     def __init__(self, config: ColorDetectorConfig | None = None) -> None:
         self.config = config or ColorDetectorConfig()
+        self._last_logged_min_area_px: int | None = None
 
     def detect(
         self, frame: Frame, debug: bool = False
     ) -> tuple[list[Detection], DebugMasks | None]:
         cfg = self.config
         width, height = frame.intrinsics.width, frame.intrinsics.height
+        min_area_px = self._resolve_min_area_px(cfg, frame.intrinsics)
 
         if cfg.roi is not None:
             x1n, y1n, x2n, y2n = cfg.roi
@@ -180,15 +271,61 @@ class ColorDetector:
                 debug_morphed_masks[color_class.name] = morphed
 
             contours, _ = cv2.findContours(morphed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            measured = [
+                self._measure_contour(contour, cfg, min_area_px, px1, py1) for contour in contours
+            ]
 
-            for contour in contours:
-                detection, contour_debug = self._evaluate_contour(
-                    contour, color_class, frame, width, height, px1, py1
+            # Structural survivors only, then capped by area descending --
+            # the course cannot physically present more than
+            # max_detections_per_class models of one colour, so once every
+            # HSV/area/solidity/aspect-ratio filter has run, the largest N
+            # remaining are the plausible real targets and everything
+            # smaller is still noise that happened to pass every other
+            # filter.
+            survivors = sorted(
+                (m for m in measured if m.reject_reason is None),
+                key=lambda m: m.area,
+                reverse=True,
+            )
+            cap = cfg.max_detections_per_class
+            kept, capped = survivors[:cap], survivors[cap:]
+
+            for m in kept:
+                detections.append(
+                    self._build_detection(m, color_class, frame, width, height, px1, py1)
                 )
-                if detection is not None:
-                    detections.append(detection)
-                if debug and contour_debug is not None:
-                    debug_contours.append(contour_debug)
+            if debug:
+                for m in kept:
+                    debug_contours.append(
+                        Contour(
+                            color_class.name, m.bbox_px, m.area, m.circularity, m.solidity, True
+                        )
+                    )
+                for m in capped:
+                    debug_contours.append(
+                        Contour(
+                            color_class.name,
+                            m.bbox_px,
+                            m.area,
+                            m.circularity,
+                            m.solidity,
+                            False,
+                            "class_cap",
+                        )
+                    )
+                for m in measured:
+                    if m.reject_reason is not None:
+                        debug_contours.append(
+                            Contour(
+                                color_class.name,
+                                m.bbox_px,
+                                m.area,
+                                m.circularity,
+                                m.solidity,
+                                False,
+                                m.reject_reason,
+                            )
+                        )
 
         debug_masks = None
         if debug:
@@ -199,41 +336,83 @@ class ColorDetector:
             )
         return detections, debug_masks
 
-    def _evaluate_contour(
+    def _resolve_min_area_px(self, cfg: ColorDetectorConfig, intrinsics: CameraIntrinsics) -> int:
+        if cfg.min_area_px is not None:
+            return cfg.min_area_px
+        computed = compute_min_area_px(intrinsics)
+        if computed != self._last_logged_min_area_px:
+            logger.info(
+                "L2 detector: computed min_area_px floor = %d px "
+                "(intrinsics quality=%s, fx=%.1f, %dx%d)",
+                computed,
+                intrinsics.quality,
+                intrinsics.fx,
+                intrinsics.width,
+                intrinsics.height,
+            )
+            self._last_logged_min_area_px = computed
+        return computed
+
+    def _measure_contour(
         self,
         contour: np.ndarray,
-        color_class: ColorClass,
-        frame: Frame,
-        width: int,
-        height: int,
+        cfg: ColorDetectorConfig,
+        min_area_px: int,
         px1: int,
         py1: int,
-    ) -> tuple[Detection | None, Contour | None]:
-        cfg = self.config
+    ) -> _ContourMetrics:
         area = cv2.contourArea(contour)
         perimeter = cv2.arcLength(contour, True)
         x, y, w, h = cv2.boundingRect(contour)
         bbox_px = (x + px1, y + py1, w, h)
         circularity = 4.0 * math.pi * area / (perimeter**2) if perimeter > 0 else 0.0
 
+        # Solidity: contour area over its own convex hull area. A solid
+        # printed model is close to its own hull (~0.9); scattered shadow
+        # patches, specular streaks and fragmented blobs are not, since
+        # morphological closing does not make a fragmented mask convex,
+        # only connected.
+        hull_area = cv2.contourArea(cv2.convexHull(contour))
+        solidity = area / hull_area if hull_area > 0 else 0.0
+
+        _, (rect_w, rect_h), _ = cv2.minAreaRect(contour)
+        short_side, long_side = min(rect_w, rect_h), max(rect_w, rect_h)
+        aspect_ratio = long_side / short_side if short_side > 0 else math.inf
+
         reject_reason: str | None = None
-        if area < cfg.min_area_px:
+        aspect_lo, aspect_hi = cfg.aspect_ratio_range
+        if area < min_area_px:
             reject_reason = "area"
+        elif solidity < cfg.solidity_min:
+            reject_reason = "solidity"
+        elif not (aspect_lo <= aspect_ratio <= aspect_hi):
+            reject_reason = "aspect_ratio"
         elif cfg.require_circularity and circularity < cfg.circularity_min:
             reject_reason = "circularity"
 
-        if reject_reason is not None:
-            return None, Contour(color_class.name, bbox_px, area, circularity, False, reject_reason)
+        return _ContourMetrics(
+            contour, bbox_px, area, circularity, solidity, rect_w, rect_h, reject_reason
+        )
 
-        (ecx, ecy), _ = cv2.minEnclosingCircle(contour)
-        _, (rect_w, rect_h), _ = cv2.minAreaRect(contour)
-        pixel_size = max(rect_w, rect_h)
+    def _build_detection(
+        self,
+        m: _ContourMetrics,
+        color_class: ColorClass,
+        frame: Frame,
+        width: int,
+        height: int,
+        px1: int,
+        py1: int,
+    ) -> Detection:
+        cfg = self.config
+        pixel_size = max(m.rect_w, m.rect_h)
+        (ecx, ecy), _ = cv2.minEnclosingCircle(m.contour)
         cx_full, cy_full = ecx + px1, ecy + py1
 
-        x1n = max(0.0, bbox_px[0] / width)
-        y1n = max(0.0, bbox_px[1] / height)
-        x2n = min(1.0, (bbox_px[0] + bbox_px[2]) / width)
-        y2n = min(1.0, (bbox_px[1] + bbox_px[3]) / height)
+        x1n = max(0.0, m.bbox_px[0] / width)
+        y1n = max(0.0, m.bbox_px[1] / height)
+        x2n = min(1.0, (m.bbox_px[0] + m.bbox_px[2]) / width)
+        y2n = min(1.0, (m.bbox_px[1] + m.bbox_px[3]) / height)
 
         range_m: float | None = None
         range_source: RangeSource = "none"
@@ -252,9 +431,9 @@ class ColorDetector:
         # ratio (contour area over its own bounding box) works for both
         # circular and elongated shapes, unlike circularity, which would
         # unfairly penalise a legitimately-detected aircraft silhouette.
-        confidence = min(1.0, area / max(w * h, 1))
+        confidence = min(1.0, m.area / max(m.bbox_px[2] * m.bbox_px[3], 1))
 
-        detection = Detection(
+        return Detection(
             bbox=(x1n, y1n, x2n, y2n),
             cls=None,
             confidence=confidence,
@@ -263,8 +442,6 @@ class ColorDetector:
             source_layer=Layer.L2,
             iff=color_class.iff,
         )
-        contour_debug = Contour(color_class.name, bbox_px, area, circularity, True, None)
-        return detection, contour_debug
 
 
 # --- tuning preset persistence ---
@@ -280,6 +457,9 @@ def config_to_dict(config: ColorDetectorConfig) -> dict:
         "min_area_px": config.min_area_px,
         "circularity_min": config.circularity_min,
         "require_circularity": config.require_circularity,
+        "solidity_min": config.solidity_min,
+        "aspect_ratio_range": list(config.aspect_ratio_range),
+        "max_detections_per_class": config.max_detections_per_class,
         "classes": {
             c.name: {
                 "hue_ranges": [list(r) for r in c.hue_ranges],
@@ -316,12 +496,18 @@ def config_from_dict(data: dict) -> ColorDetectorConfig:
                 val_min=entry.get("val_min", class_defaults.val_min),
             )
         )
+    aspect_range = data.get("aspect_ratio_range", defaults.aspect_ratio_range)
     return ColorDetectorConfig(
         classes=tuple(classes),
         morph_kernel=data.get("morph_kernel", defaults.morph_kernel),
         min_area_px=data.get("min_area_px", defaults.min_area_px),
         circularity_min=data.get("circularity_min", defaults.circularity_min),
         require_circularity=data.get("require_circularity", defaults.require_circularity),
+        solidity_min=data.get("solidity_min", defaults.solidity_min),
+        aspect_ratio_range=(aspect_range[0], aspect_range[1]),
+        max_detections_per_class=data.get(
+            "max_detections_per_class", defaults.max_detections_per_class
+        ),
     )
 
 

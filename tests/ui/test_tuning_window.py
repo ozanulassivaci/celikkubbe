@@ -11,10 +11,11 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QPixmap
 
 from celikkubbe.core.clock import FakeClock
+from celikkubbe.core.strings import UI_LABEL_TR
 from celikkubbe.io.sim_link import SimTurretLink
 from celikkubbe.ui.pipeline_worker import PipelineWorker
 from celikkubbe.ui.tuning_window import TuningWindow, _PreviewWidget, normalize_drag_to_roi
-from celikkubbe.vision.l2_color import ColorDetectorConfig
+from celikkubbe.vision.l2_color import ColorDetectorConfig, Contour, DebugMasks
 from celikkubbe.vision.sources import SyntheticSource, SyntheticSourceConfig
 
 _TICK_DT = 1.0 / 30.0
@@ -60,7 +61,10 @@ def test_sliders_initialize_from_the_detectors_current_config(qtbot):
 
     cfg = worker.detector.config
     assert window._sliders["morph_kernel"][0].value() == cfg.morph_kernel
-    assert window._sliders["min_area"][0].value() == cfg.min_area_px
+    # min_area_px defaults to None (auto -- computed from optics), shown
+    # as 0 on the slider; see tuning_window._set_min_area's own docstring.
+    assert cfg.min_area_px is None
+    assert window._sliders["min_area"][0].value() == 0
     hostile = next(c for c in cfg.classes if c.name == "hostile")
     assert window._sliders["hostile_hue0_lo"][0].value() == hostile.hue_ranges[0][0]
     assert window._sliders["hostile_sat"][0].value() == hostile.sat_min
@@ -89,6 +93,19 @@ def test_moving_circularity_slider_applies_as_a_fraction(qtbot):
     window._sliders["circularity_min"][0].setValue(55)
 
     assert worker.detector.config.circularity_min == 0.55
+
+
+def test_moving_min_area_slider_sets_an_explicit_override(qtbot):
+    clock = FakeClock()
+    worker = _make_worker(clock)
+    window = TuningWindow(worker)
+    qtbot.addWidget(window)
+
+    window._sliders["min_area"][0].setValue(500)
+    assert worker.detector.config.min_area_px == 500
+
+    window._sliders["min_area"][0].setValue(0)
+    assert worker.detector.config.min_area_px is None
 
 
 def test_require_circularity_checkbox_applies_to_the_detector(qtbot):
@@ -217,6 +234,28 @@ def test_preview_updates_with_counts_once_shown(qtbot):
     assert window._latest_frame is not None
     assert window._preview._pixmap is not None
     assert "KABUL" in window._counts_label.text()
+
+
+def test_counts_label_reports_class_cap_discards_separately(qtbot):
+    clock = FakeClock()
+    worker = _make_worker(clock, num_targets=1)
+    window = TuningWindow(worker)
+    qtbot.addWidget(window)
+
+    debug = DebugMasks(
+        hsv_masks={},
+        morphed_masks={},
+        contours=(
+            Contour("hostile", (0, 0, 5, 5), 100.0, 0.9, 0.9, True),
+            Contour("hostile", (10, 10, 5, 5), 50.0, 0.9, 0.9, False, "class_cap"),
+            Contour("hostile", (20, 20, 5, 5), 10.0, 0.9, 0.9, False, "area"),
+        ),
+    )
+    window._update_counts(debug)
+
+    assert window._counts_label.text() == UI_LABEL_TR["TUNING_COUNTS"].format(
+        accepted=1, rejected=2, capped=1
+    )
 
 
 def test_switching_preview_mode_does_not_crash_and_updates_pixmap(qtbot):

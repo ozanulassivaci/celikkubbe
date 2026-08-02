@@ -261,7 +261,12 @@ class TuningWindow(QDialog):
         self._sliders["morph_kernel"] = (slider, label)
         layout.addWidget(row)
 
-        row, slider, label = _slider_row(UI_LABEL_TR["MIN_AREA_LABEL"], 1, 200, 12)
+        # 0 means "auto": leaves ColorDetectorConfig.min_area_px at None,
+        # so the detector computes the structural floor itself from
+        # intrinsics every frame (see l2_color.compute_min_area_px).
+        # Any value above 0 sets an explicit fixed override instead.
+        row, slider, label = _slider_row(UI_LABEL_TR["MIN_AREA_LABEL"], 0, 2000, 0)
+        slider.setToolTip(UI_LABEL_TR["MIN_AREA_AUTO_HINT"])
         slider.valueChanged.connect(self._set_min_area)
         self._sliders["min_area"] = (slider, label)
         layout.addWidget(row)
@@ -383,7 +388,9 @@ class TuningWindow(QDialog):
         self._apply_config(dataclasses.replace(self._working_config, morph_kernel=value))
 
     def _set_min_area(self, value: int) -> None:
-        self._apply_config(dataclasses.replace(self._working_config, min_area_px=value))
+        self._apply_config(
+            dataclasses.replace(self._working_config, min_area_px=value if value > 0 else None)
+        )
 
     def _set_circularity_min(self, value: int) -> None:
         self._apply_config(dataclasses.replace(self._working_config, circularity_min=value / 100.0))
@@ -470,7 +477,7 @@ class TuningWindow(QDialog):
         friendly = next(c for c in cfg.classes if c.name == "friendly")
         values = {
             "morph_kernel": cfg.morph_kernel,
-            "min_area": cfg.min_area_px,
+            "min_area": cfg.min_area_px if cfg.min_area_px is not None else 0,
             "circularity_min": round(cfg.circularity_min * 100),
             "hostile_sat": hostile.sat_min,
             "hostile_val": hostile.val_min,
@@ -519,8 +526,13 @@ class TuningWindow(QDialog):
             return
         accepted = sum(1 for c in debug.contours if c.accepted)
         rejected = len(debug.contours) - accepted
+        # Reported separately from the rest of "RED": a persistently high
+        # class-cap count means real targets are being discarded by the
+        # per-class cap, not noise -- a different problem from a tight
+        # HSV/area/solidity threshold, and one the operator should notice.
+        capped = sum(1 for c in debug.contours if c.reject_reason == "class_cap")
         self._counts_label.setText(
-            UI_LABEL_TR["TUNING_COUNTS"].format(accepted=accepted, rejected=rejected)
+            UI_LABEL_TR["TUNING_COUNTS"].format(accepted=accepted, rejected=rejected, capped=capped)
         )
 
     def _render_preview(self) -> None:
@@ -554,4 +566,24 @@ class TuningWindow(QDialog):
                 x, y, w, h = contour.bbox_px
                 color = (0, 200, 0) if contour.accepted else (0, 0, 200)  # BGR
                 cv2.rectangle(image, (x, y), (x + w, y + h), color, 2)
+                if not contour.accepted and contour.reject_reason is not None:
+                    # The whole point of 2e: which specific filter
+                    # rejected this contour, so tuning is diagnostic
+                    # rather than guesswork -- not just "red box, unknown
+                    # why". The English slug itself, not
+                    # REJECT_REASON_LABEL_TR's Turkish text: cv2.putText's
+                    # Hershey fonts cannot render Turkish diacritics
+                    # (İ/Ş/Ğ/Ü/Ö/Ç render as missing or wrong glyphs), and
+                    # a corrupted label would be worse than an English one
+                    # for a technical tuning tool.
+                    cv2.putText(
+                        image,
+                        contour.reject_reason,
+                        (x, max(0, y - 4)),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.4,
+                        color,
+                        1,
+                        cv2.LINE_AA,
+                    )
         return frame_to_pixmap(image)
