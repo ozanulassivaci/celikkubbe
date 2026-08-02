@@ -252,6 +252,24 @@ class PipelineWorker(QThread):
         """
         return self._detector
 
+    @property
+    def aim_solver(self) -> AimSolver:
+        """The same solver instance _tick_inner uses for every confirmed
+        track, exposed so a manual click-to-aim (Stage 1, clicking empty
+        canvas) solves through identical geometry/ballistics/boresight
+        calibration rather than a second AimSolver silently drifting from
+        whatever this one has loaded.
+        """
+        return self._aim_solver
+
+    def request_goto(self, az_deg: float, el_deg: float) -> None:
+        """Direct Goto, bypassing engagement.py entirely -- for Stage 1's
+        click-to-aim on empty canvas, which is not a tracked target and
+        so has no selected_track_id for the engagement FSM to solve for.
+        """
+        goto = Goto(az_deg, el_deg, config.AIM_MAX_VEL_DPS, config.AIM_MAX_ACCEL_DPS2)
+        self._link_worker.send(goto)
+
     # --- LinkWorker callback: runs on LinkWorker's own background
     # thread, not this one, hence its own lock rather than reusing
     # _snapshot_lock or _operator_lock ---

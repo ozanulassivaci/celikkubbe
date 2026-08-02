@@ -34,6 +34,7 @@ from celikkubbe.core.protocols import Clock, FrameSource, TurretLink
 from celikkubbe.core.types import Stage
 from celikkubbe.io.sim_link import SimTurretLink
 from celikkubbe.ui import theme
+from celikkubbe.ui.gamepad import GamepadWorker
 from celikkubbe.ui.main_window import MainWindow
 from celikkubbe.ui.pipeline_worker import PipelineWorker
 from celikkubbe.vision.sources import (
@@ -104,19 +105,21 @@ def build(argv: list[str] | None = None) -> tuple[QApplication, MainWindow, Pipe
     source, source_label = _build_source(args, clock)
     link = _build_link(args, clock)
     worker = PipelineWorker(source, link, clock, stage=stage)
-    window = MainWindow(worker, source_label=source_label, font_family=font_family)
+    gamepad = GamepadWorker()
+    window = MainWindow(worker, source_label=source_label, font_family=font_family, gamepad=gamepad)
 
     if args.fullscreen:
         window.showFullScreen()
     else:
         window.show()
     worker.start()
+    gamepad.start()
 
     return app, window, worker
 
 
 def main(argv: list[str] | None = None) -> int:
-    app, _window, worker = build(argv)
+    app, window, worker = build(argv)
 
     # Referenced only by this frame, which stays on the stack for the
     # entire blocking app.exec() call below -- safe from GC without
@@ -126,7 +129,13 @@ def main(argv: list[str] | None = None) -> int:
     poll_timer.start(_SIGINT_POLL_MS)
 
     signal.signal(signal.SIGINT, lambda *_args: app.quit())
+    # A safety net for the SIGINT/programmatic-quit path, which stops the
+    # event loop without necessarily running MainWindow.closeEvent first
+    # -- that method already stops both worker and gamepad the same way
+    # for the ordinary window-close path.
     app.aboutToQuit.connect(lambda: (worker.stop(), worker.wait(2000)))
+    if window.gamepad is not None:
+        app.aboutToQuit.connect(lambda: (window.gamepad.stop(), window.gamepad.wait(2000)))
 
     return app.exec()
 

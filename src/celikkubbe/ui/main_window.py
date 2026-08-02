@@ -9,8 +9,6 @@ reacts to signals emitted from PipelineWorker's own thread.
 
 from __future__ import annotations
 
-import dataclasses
-
 from PyQt6.QtCore import QEvent, Qt, QTimer
 from PyQt6.QtWidgets import (
     QApplication,
@@ -26,20 +24,39 @@ from PyQt6.QtWidgets import (
 from celikkubbe import __version__
 from celikkubbe.core import config
 from celikkubbe.core.strings import UI_LABEL_TR
-from celikkubbe.core.types import EngagementState, Layer, Mode, OperatorInput, Stage, Track
+from celikkubbe.core.types import IFF, Axis, EngagementState, Layer, Mode, Stage, Track, TrackStatus
 from celikkubbe.ui import theme
+from celikkubbe.ui.gamepad import GamepadWorker
 from celikkubbe.ui.left_panel import LeftPanel
+from celikkubbe.ui.operator_input import OperatorInputBuilder
+from celikkubbe.ui.overlays.help import HelpOverlay
 from celikkubbe.ui.overlays.safe import SafeOverlay
 from celikkubbe.ui.overlays.selftest import SelfTestOverlay
 from celikkubbe.ui.pipeline_worker import PipelineWorker
 from celikkubbe.ui.right_panel import RightPanel
 from celikkubbe.ui.snapshot import UiSnapshot
 from celikkubbe.ui.theme import StatusBadge
+from celikkubbe.ui.tuning_window import TuningWindow
 from celikkubbe.ui.video_canvas import VideoCanvas
 
 _STATUS_STRIP_HEIGHT_PX = 28
 _TITLE_BAR_HEIGHT_PX = 36
 _ERROR_TOAST_MS = 5000
+# A manual click-to-aim point has no detected size, so it is represented
+# as a zero-area bbox exactly at the click -- AimSolver only ever reads
+# its centre (see geometry.solver.AimSolver.solve's own u_center/v_center
+# computation), so this is not degenerate for that purpose.
+_JOG_KEYS: dict[int, tuple[Axis, int]] = {
+    Qt.Key.Key_Up: (Axis.TILT, 1),
+    Qt.Key.Key_Down: (Axis.TILT, -1),
+    Qt.Key.Key_Left: (Axis.PAN, -1),
+    Qt.Key.Key_Right: (Axis.PAN, 1),
+}
+_STAGE_KEYS: dict[int, Stage] = {
+    Qt.Key.Key_1: Stage.STAGE_1,
+    Qt.Key.Key_2: Stage.STAGE_2,
+    Qt.Key.Key_3: Stage.STAGE_3,
+}
 
 _MODE_COLOR: dict[Mode, str] = {
     Mode.M1_INIT: theme.TEXT_DIM,
@@ -90,6 +107,30 @@ def _format_duration_ms(value_ms: float) -> str:
     return f"{value_ms:.0f}ms"
 
 
+def _synthetic_click_track(x_norm: float, y_norm: float) -> Track:
+    """A manual click has no detected size, velocity or range -- a
+    zero-area bbox exactly at the click, with range_m=None so AimSolver
+    substitutes config.DEFAULT_RANGE_M exactly like it would for any real
+    CONFIRMED track with unknown range (see AimSolver.solve's own
+    docstring). track_id=-1 is never a real track id and is only read
+    transiently by solve() itself -- it is never stored anywhere.
+    """
+    return Track(
+        track_id=-1,
+        cls=None,
+        confidence=1.0,
+        range_m=None,
+        range_source="none",
+        iff=IFF.UNKNOWN,
+        bbox=(x_norm, y_norm, x_norm, y_norm),
+        velocity=(0.0, 0.0),
+        status=TrackStatus.CONFIRMED,
+        risk_score=0.0,
+        frames_confirmed=0,
+        last_seen_t=0.0,
+    )
+
+
 class StatusStrip(QWidget):
     """Always-visible bottom strip: mode/engagement/layer badges, link
     health, performance, homing status and counters. The operator's
@@ -119,12 +160,14 @@ class StatusStrip(QWidget):
         self._perf_label = self._add_text_label(layout, "FPS:99.9 INF:999µs L1:YOK")
         self._homing_label = self._add_text_label(layout, "HOMED P:Y T:Y")
         self._counters_label = self._add_text_label(layout, "AMMO:999 ATT:9/9 TRK:99")
+        self._gamepad_label = self._add_text_label(layout, UI_LABEL_TR["GAMEPAD_DISCONNECTED"])
         self._error_label = self._add_text_label(layout, "")
 
         layout.addStretch(1)
         self._error_timer = QTimer(self)
         self._error_timer.setSingleShot(True)
         self._error_timer.timeout.connect(lambda: self._error_label.setText(""))
+        self.set_gamepad_connected(False)
 
     def _add_text_label(self, layout: QHBoxLayout, width_reference: str) -> QLabel:
         """``width_reference`` is never displayed -- it only sizes the
@@ -205,6 +248,11 @@ class StatusStrip(QWidget):
         self._error_label.setStyleSheet(f"color: {theme.DANGER};")
         self._error_timer.start(_ERROR_TOAST_MS)
 
+    def set_gamepad_connected(self, connected: bool) -> None:
+        text = UI_LABEL_TR["GAMEPAD_CONNECTED" if connected else "GAMEPAD_DISCONNECTED"]
+        self._gamepad_label.setText(text)
+        self._gamepad_label.setStyleSheet(f"color: {theme.OK if connected else theme.TEXT_DIM};")
+
 
 def _build_title_bar() -> QFrame:
     bar = QFrame()
@@ -230,16 +278,21 @@ class MainWindow(QMainWindow):
         worker: PipelineWorker,
         source_label: str = "",
         font_family: str = "monospace",
+        gamepad: GamepadWorker | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self._worker = worker
         self._font_family = font_family
-        self._operator_input = OperatorInput()
+        self._gamepad = gamepad
+        self._input_builder = OperatorInputBuilder()
         self._latest_snapshot: UiSnapshot | None = None
+        self._held_jog_key: int | None = None
+        self._tuning_window: TuningWindow | None = None
 
         self.setWindowTitle("Çelikkubbe")
         self.resize(1400, 800)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -275,11 +328,26 @@ class MainWindow(QMainWindow):
         self._safe_overlay.acknowledge_requested.connect(self._worker.acknowledge_fault)
         self._safe_overlay.hide()
 
+        self._help_overlay = HelpOverlay(self)
+        self._help_overlay.close_requested.connect(self._hide_help_overlay)
+        self._help_overlay.hide()
+
         self._canvas.clicked_normalized.connect(self._on_canvas_clicked)
         self._left_panel.track_selected.connect(self._select_track)
         self._wire_right_panel()
+        if self._gamepad is not None:
+            self._wire_gamepad(self._gamepad)
         self._worker.snapshot_ready.connect(self._on_snapshot)
         self._worker.error.connect(self._on_error)
+
+    @property
+    def gamepad(self) -> GamepadWorker | None:
+        """The GamepadWorker passed in at construction, if any -- exposed
+        so app.py's aboutToQuit safety net can stop it without reaching
+        into a private attribute (see closeEvent for the ordinary
+        window-close path, which already stops it the same way).
+        """
+        return self._gamepad
 
     def _wire_right_panel(self) -> None:
         panel = self._right_panel
@@ -290,8 +358,19 @@ class MainWindow(QMainWindow):
         panel.jog_released.connect(self._worker.request_stop)
         panel.layer_selected.connect(self._worker.select_layer)
         panel.stage_selected.connect(self._on_stage_selected)
-        panel.fire_pressed.connect(self._on_fire_pressed)
-        panel.fire_released.connect(self._on_fire_released)
+        panel.fire_pressed.connect(lambda: self._set_fire_and_arm_source("gui", True))
+        panel.fire_released.connect(lambda: self._set_fire_and_arm_source("gui", False))
+
+    def _wire_gamepad(self, gamepad: GamepadWorker) -> None:
+        gamepad.jog_axis_changed.connect(self._on_gamepad_jog_axis_changed)
+        # RT and A are independent physical controls on the gamepad --
+        # unlike ATIŞ/space, which double as both fire and the Stage 1
+        # dead-man switch for lack of a separate hold-to-arm control (see
+        # _set_fire_and_arm_source), these stay separate here.
+        gamepad.fire_changed.connect(lambda held: self._set_fire_source("gamepad", held))
+        gamepad.arm_changed.connect(lambda held: self._set_arm_source("gamepad", held))
+        gamepad.estop_requested.connect(self._worker.request_estop)
+        gamepad.connected_changed.connect(self._status_strip.set_gamepad_connected)
 
     # --- Qt overrides ---
 
@@ -300,6 +379,9 @@ class MainWindow(QMainWindow):
         self._reposition_overlays()
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt override
+        if self._gamepad is not None:
+            self._gamepad.stop()
+            self._gamepad.wait(2000)
         self._worker.stop()
         self._worker.wait(2000)
         super().closeEvent(event)
@@ -312,6 +394,46 @@ class MainWindow(QMainWindow):
         # nobody's finger actually on the control anymore.
         if event.type() == QEvent.Type.ActivationChange and not self.isActiveWindow():
             self._right_panel.force_stop_all()
+            self._release_jog_key()
+            self._set_fire_and_arm_source("keyboard", False)
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802 - Qt override
+        if event.isAutoRepeat():
+            return
+        key = event.key()
+        if key in _JOG_KEYS:
+            self._held_jog_key = key
+            axis, direction = _JOG_KEYS[key]
+            self._worker.request_jog(axis, direction, self._right_panel.jog_speed_dps)
+        elif key == Qt.Key.Key_Space:
+            self._set_fire_and_arm_source("keyboard", True)
+        elif key == Qt.Key.Key_Escape:
+            self._worker.request_estop()
+        elif key == Qt.Key.Key_A:
+            self._toggle_armed()
+        elif key in _STAGE_KEYS:
+            self._on_stage_selected(_STAGE_KEYS[key])
+        elif key == Qt.Key.Key_H:
+            self._toggle_tuning_window()
+        elif key == Qt.Key.Key_F1:
+            self._toggle_help_overlay()
+        else:
+            super().keyPressEvent(event)
+            return
+        event.accept()
+
+    def keyReleaseEvent(self, event) -> None:  # noqa: N802 - Qt override
+        if event.isAutoRepeat():
+            return
+        key = event.key()
+        if key in _JOG_KEYS:
+            self._release_jog_key(key)
+        elif key == Qt.Key.Key_Space:
+            self._set_fire_and_arm_source("keyboard", False)
+        else:
+            super().keyReleaseEvent(event)
+            return
+        event.accept()
 
     # --- wiring ---
 
@@ -322,6 +444,7 @@ class MainWindow(QMainWindow):
         rect = central.rect()
         self._selftest_overlay.setGeometry(rect)
         self._safe_overlay.setGeometry(rect)
+        self._help_overlay.setGeometry(rect)
 
     def _on_snapshot(self, snapshot: UiSnapshot) -> None:
         self._latest_snapshot = snapshot
@@ -369,13 +492,30 @@ class MainWindow(QMainWindow):
 
     def _on_canvas_clicked(self, x_norm: float, y_norm: float) -> None:
         track = self._find_track_at(x_norm, y_norm)
-        if track is None:
+        if track is not None:
+            self._select_track(track.track_id)
             return
-        self._select_track(track.track_id)
+        if self._latest_snapshot is None or self._latest_snapshot.state.stage is not Stage.STAGE_1:
+            return
+        self._goto_click_point(x_norm, y_norm)
+
+    def _goto_click_point(self, x_norm: float, y_norm: float) -> None:
+        """Stage 1, clicking empty canvas: a direct Goto through the same
+        AimSolver _tick_inner uses for every real track (see
+        PipelineWorker.aim_solver's own docstring), not a raw bearing --
+        the click still benefits from ballistic drop and boresight
+        correction even though it is not a detected target.
+        """
+        snapshot = self._latest_snapshot
+        synthetic = _synthetic_click_track(x_norm, y_norm)
+        solution = self._worker.aim_solver.solve(synthetic, snapshot.frame.intrinsics)
+        if solution is None:
+            return  # unreachable: _synthetic_click_track is always CONFIRMED
+        self._worker.request_goto(solution.az_deg, solution.el_deg)
 
     def _select_track(self, track_id: int) -> None:
-        self._operator_input = dataclasses.replace(self._operator_input, manual_target_id=track_id)
-        self._worker.set_operator_input(self._operator_input)
+        self._input_builder.set_manual_target(track_id)
+        self._worker.set_operator_input(self._input_builder.build())
 
     def _on_stage_selected(self, stage: Stage) -> None:
         self._worker.set_stage(stage)
@@ -387,24 +527,67 @@ class MainWindow(QMainWindow):
         if app is not None:
             app.setStyleSheet(theme.build_qss(theme.accent_for_stage(stage), self._font_family))
 
-    def _on_fire_pressed(self) -> None:
-        # ATIŞ held down is both operator.fire_requested (S4_AIM ->
-        # S5_ENGAGE) and Stage 1's own continuous dead-man switch
-        # (operator.arm_held) -- see engagement.py's module docstring.
-        # Releasing it anytime before the shot is taken must abort back
-        # to S3_TRACK, which armed_by_operator turning False already does
-        # on its own; there is no separate hold-to-arm control in this
-        # GUI build.
-        self._operator_input = dataclasses.replace(
-            self._operator_input, fire_requested=True, arm_held=True
-        )
-        self._worker.set_operator_input(self._operator_input)
+    def _set_fire_source(self, source: str, held: bool) -> None:
+        self._input_builder.set_fire(source, held)
+        self._worker.set_operator_input(self._input_builder.build())
 
-    def _on_fire_released(self) -> None:
-        self._operator_input = dataclasses.replace(
-            self._operator_input, fire_requested=False, arm_held=False
-        )
-        self._worker.set_operator_input(self._operator_input)
+    def _set_arm_source(self, source: str, held: bool) -> None:
+        self._input_builder.set_arm(source, held)
+        self._worker.set_operator_input(self._input_builder.build())
+
+    def _set_fire_and_arm_source(self, source: str, held: bool) -> None:
+        """ATIŞ and the space bar both double as fire_requested *and*
+        Stage 1's own continuous dead-man switch (arm_held) -- see
+        engagement.py's module docstring -- for lack of a separate
+        hold-to-arm control on either. Releasing either anytime before
+        the shot is taken aborts back to S3_TRACK on its own, via
+        armed_by_operator turning False.
+        """
+        self._input_builder.set_fire(source, held)
+        self._input_builder.set_arm(source, held)
+        self._worker.set_operator_input(self._input_builder.build())
+
+    def _release_jog_key(self, key: int | None = None) -> None:
+        if key is not None and self._held_jog_key != key:
+            return  # a different key is still shadowing this one -- see keyPressEvent
+        if self._held_jog_key is None:
+            return
+        self._held_jog_key = None
+        self._worker.request_stop()
+
+    def _toggle_armed(self) -> None:
+        telemetry = self._latest_snapshot.telemetry if self._latest_snapshot is not None else None
+        currently_armed = telemetry is not None and telemetry.armed
+        self._worker.request_arm(not currently_armed)
+
+    def _on_gamepad_jog_axis_changed(self, axis: Axis, speed_dps: float) -> None:
+        direction = 1 if speed_dps >= 0.0 else -1
+        self._worker.request_jog(axis, direction, abs(speed_dps))
+
+    def _toggle_tuning_window(self) -> None:
+        if self._tuning_window is None:
+            self._tuning_window = TuningWindow(self._worker, parent=self)
+        if self._tuning_window.isVisible():
+            self._tuning_window.hide()
+        else:
+            self._tuning_window.show()
+            self._tuning_window.raise_()
+
+    def _toggle_help_overlay(self) -> None:
+        # isHidden(), not isVisible(): the latter also depends on every
+        # ancestor's own visibility, so it never reads True for a widget
+        # inside a MainWindow that itself is never shown (as in this
+        # module's own tests) -- see SelfTestOverlay/SafeOverlay's own
+        # isHidden()-based checks for the same established reason.
+        if not self._help_overlay.isHidden():
+            self._hide_help_overlay()
+            return
+        self._reposition_overlays()
+        self._help_overlay.show()
+        self._help_overlay.raise_()
+
+    def _hide_help_overlay(self) -> None:
+        self._help_overlay.hide()
 
     def _find_track_at(self, x_norm: float, y_norm: float) -> Track | None:
         if self._latest_snapshot is None:

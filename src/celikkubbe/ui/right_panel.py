@@ -279,6 +279,15 @@ class RightPanel(QWidget):
 
         return column
 
+    @property
+    def jog_speed_dps(self) -> float:
+        """The speed slider's current value -- exposed so the keyboard's
+        arrow-key jog uses the exact same operator-chosen speed as this
+        panel's own directional pad, rather than a second, independent
+        default that could silently disagree with it.
+        """
+        return float(self._speed_slider.value())
+
     # --- jog / fire press-release handling ---
 
     def _on_jog_pressed(self, axis: Axis, direction: int) -> None:

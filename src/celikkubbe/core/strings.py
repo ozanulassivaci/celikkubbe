@@ -122,7 +122,23 @@ UI_LABEL_TR: dict[str, str] = {
     "RESET_DEFAULTS": "VARSAYILANA DÖN",
     "CLEAR_ROI": "ROI TEMİZLE",
     "CLOSE_BUTTON": "KAPAT",
+    "HELP_TITLE": "KONTROLLER",
+    "GAMEPAD_CONNECTED": "GAMEPAD BAĞLI",
+    "GAMEPAD_DISCONNECTED": "GAMEPAD BAĞLI DEĞİL",
 }
+
+# (key label, description) pairs for the F1 help overlay -- a fixed
+# reference list, not a ReasonCode lookup, so it lives as its own tuple
+# rather than forcing single-line entries into UI_LABEL_TR.
+HELP_CONTROLS_TR: tuple[tuple[str, str], ...] = (
+    ("OK TUŞLARI", "Pan / eğim manuel kontrol"),
+    ("BOŞLUK", "Ateşleme (basılı tutun)"),
+    ("A", "Emniyet kilidini aç / kapat"),
+    ("ESC", "Acil durdurma"),
+    ("1 / 2 / 3", "Aşama seçimi"),
+    ("H", "HSV ayarları penceresi"),
+    ("F1", "Bu yardım ekranı"),
+)
 
 # Self-test item detail templates -- dynamic (interpolated), so kept
 # separate from the fixed-string dicts above rather than crammed in.
