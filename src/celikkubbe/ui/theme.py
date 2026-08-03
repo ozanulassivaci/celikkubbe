@@ -43,6 +43,16 @@ ACCENT_A1 = "#F97316"  # stage 1, orange
 ACCENT_A2 = "#F59E0B"  # stage 2, amber
 ACCENT_A3 = "#22D3EE"  # stage 3, cyan
 
+# Full-window overlay backdrop (self-test, SAFE, help) -- was 190/255,
+# which mathematically dims correctly (confirmed by direct pixel
+# sampling) but leaves enough of the panels' own bright accent colours
+# and badges legible at a glance that the overlay reads as "not really
+# covering" them, especially next to the self-test table's own dense
+# rows -- exactly the "panel content shows through" complaint. Every
+# overlay must use this one constant, not its own literal, so a future
+# contrast fix only has to change it here.
+OVERLAY_BACKDROP = QColor(0, 0, 0, 235)
+
 STAGE_ACCENT: dict[Stage, str] = {
     Stage.STAGE_1: ACCENT_A1,
     Stage.STAGE_2: ACCENT_A2,

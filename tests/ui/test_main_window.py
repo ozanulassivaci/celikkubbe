@@ -123,6 +123,48 @@ def test_safe_overlay_shows_in_m4_and_requires_acknowledgement(qtbot):
     assert window._safe_overlay._fault_label.text() == strings.describe(ReasonCode.ESTOP_ACTIVE)
 
 
+def test_selftest_and_safe_overlays_are_never_both_visible(qtbot):
+    """Regression test: _update_overlays used to gate each overlay's
+    show/hide off two separate if/else blocks keyed on the same mode --
+    correct as long as both stayed in sync, but nothing enforced that.
+    Each branch now explicitly hides the other overlay too. Drives a
+    full self-test -> estop -> SAFE -> acknowledge -> self-test cycle,
+    checking both overlays' visibility on every single tick along the
+    way, not just at the start and end.
+    """
+    clock = FakeClock()
+    window, worker, link = _make_window(clock)
+    qtbot.addWidget(window)
+
+    def assert_mutually_exclusive() -> None:
+        st_visible = not window._selftest_overlay.isHidden()
+        safe_visible = not window._safe_overlay.isHidden()
+        assert not (
+            st_visible and safe_visible
+        ), f"both overlays visible at mode={window._latest_snapshot.state.mode}"
+
+    for _ in range(60):
+        if worker._state.mode is not Mode.M1_INIT:
+            break
+        _tick(worker, clock)
+        assert_mutually_exclusive()
+
+    link.inject_estop()
+    for _ in range(5):
+        _tick(worker, clock)
+        assert_mutually_exclusive()
+    assert worker._state.mode is Mode.M4_SAFE
+
+    link.release_estop()
+    worker.acknowledge_fault()
+    for _ in range(60):
+        _tick(worker, clock)
+        assert_mutually_exclusive()
+        if worker._state.mode is Mode.M2_STANDBY:
+            break
+    assert worker._state.mode is Mode.M2_STANDBY
+
+
 def test_dev_mode_shows_permanent_banner_and_status_badge(qtbot):
     clock = FakeClock()
     window, worker, _link = _make_dev_window(clock)

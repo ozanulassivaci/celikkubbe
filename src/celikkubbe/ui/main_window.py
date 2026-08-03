@@ -468,17 +468,22 @@ class MainWindow(QMainWindow):
         self._update_overlays(snapshot)
 
     def _update_overlays(self, snapshot: UiSnapshot) -> None:
+        """At most one of selftest/safe is ever shown -- enforced directly
+        here (each branch hides the other explicitly) rather than left as
+        an emergent property of two separate if/else blocks both keyed off
+        the same mode, which is easy to silently break with a future edit
+        to just one of them.
+        """
         mode = snapshot.state.mode
 
         if mode is Mode.M1_INIT:
+            self._safe_overlay.hide()
             self._selftest_overlay.set_result(snapshot.state.last_self_test)
             self._reposition_overlays()
             self._selftest_overlay.show()
             self._selftest_overlay.raise_()
-        else:
+        elif mode is Mode.M4_SAFE:
             self._selftest_overlay.hide()
-
-        if mode is Mode.M4_SAFE:
             failure_detail = self._self_test_failure_detail(snapshot)
             self._safe_overlay.set_fault(snapshot.fault_reason, failure_detail)
             position_valid = (
@@ -490,6 +495,7 @@ class MainWindow(QMainWindow):
             self._safe_overlay.show()
             self._safe_overlay.raise_()
         else:
+            self._selftest_overlay.hide()
             self._safe_overlay.hide()
 
     @staticmethod

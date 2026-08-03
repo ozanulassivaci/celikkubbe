@@ -13,14 +13,12 @@ pair.
 from __future__ import annotations
 
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QColor, QPainter, QPaintEvent
+from PyQt6.QtGui import QPainter, QPaintEvent
 from PyQt6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
 
 from celikkubbe.core.strings import SELF_TEST_ITEM_LABEL_TR, UI_LABEL_TR
 from celikkubbe.core.types import SelfTestItem, SelfTestResult
 from celikkubbe.ui import theme
-
-_OVERLAY_BG = QColor(0, 0, 0, 190)
 
 
 class SelfTestOverlay(QWidget):
@@ -101,6 +99,6 @@ class SelfTestOverlay(QWidget):
 
     def paintEvent(self, event: QPaintEvent) -> None:  # noqa: N802 - Qt override
         painter = QPainter(self)
-        painter.fillRect(self.rect(), _OVERLAY_BG)
+        painter.fillRect(self.rect(), theme.OVERLAY_BACKDROP)
         painter.end()
         super().paintEvent(event)

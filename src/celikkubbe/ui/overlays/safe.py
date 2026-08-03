@@ -15,7 +15,7 @@ squeezed above it.
 from __future__ import annotations
 
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QColor, QPainter, QPaintEvent
+from PyQt6.QtGui import QPainter, QPaintEvent
 from PyQt6.QtWidgets import QLabel, QPlainTextEdit, QPushButton, QVBoxLayout, QWidget
 
 from celikkubbe.core import strings
@@ -24,7 +24,6 @@ from celikkubbe.core.types import Axis, ReasonCode
 from celikkubbe.io.codec import EventId
 from celikkubbe.ui import theme
 
-_OVERLAY_BG = QColor(0, 0, 0, 190)
 _MAX_LOG_LINES = 20
 _LOG_MAX_HEIGHT_PX = 200
 
@@ -104,6 +103,6 @@ class SafeOverlay(QWidget):
 
     def paintEvent(self, event: QPaintEvent) -> None:  # noqa: N802 - Qt override
         painter = QPainter(self)
-        painter.fillRect(self.rect(), _OVERLAY_BG)
+        painter.fillRect(self.rect(), theme.OVERLAY_BACKDROP)
         painter.end()
         super().paintEvent(event)
