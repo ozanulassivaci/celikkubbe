@@ -49,6 +49,18 @@ CONFIDENCE_THRESHOLD = 0.65
 ACQUIRE_FRAMES = 5  # consecutive consistent frames to confirm in S2
 TRACK_LOST_MS = 1000
 MIN_TARGET_PX = 8  # below this the UI warns "target under resolution"
+# A detection this narrow yet at least this confident, or with a
+# silhouette entirely outside this aspect-ratio band, is very likely a
+# fragment of a larger object rather than the whole target -- its range
+# estimate looks confident but is meaningless (size-based range assumes
+# the box covers the whole model; even a depth-derived range samples a
+# window centred on the fragment's own, wrong centroid). Display-only:
+# nothing here gates engagement -- RangeGate has its own, decision-
+# relevant thresholds, and vision.l2_color.ColorDetectorConfig has its
+# own, independently-tunable aspect_ratio_range for detection filtering.
+IMPLAUSIBLE_RANGE_MAX_PX = 30
+IMPLAUSIBLE_RANGE_MIN_CONFIDENCE = 0.6
+IMPLAUSIBLE_RANGE_ASPECT_RATIO_RANGE = (0.2, 5.0)
 
 # --- cascade ---
 L1_RECOVERY_INTERVAL_S = 10.0  # silently probe L1 while running L2

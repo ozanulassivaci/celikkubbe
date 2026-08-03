@@ -19,11 +19,18 @@ import logging
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Literal
 
 import cv2
 import numpy as np
 
-from celikkubbe.core.config import MAX_ENGAGEMENT_RANGE_M, MIN_TARGET_PX
+from celikkubbe.core.config import (
+    IMPLAUSIBLE_RANGE_ASPECT_RATIO_RANGE,
+    IMPLAUSIBLE_RANGE_MAX_PX,
+    IMPLAUSIBLE_RANGE_MIN_CONFIDENCE,
+    MAX_ENGAGEMENT_RANGE_M,
+    MIN_TARGET_PX,
+)
 from celikkubbe.core.types import (
     IFF,
     BoundingBox,
@@ -32,6 +39,7 @@ from celikkubbe.core.types import (
     Frame,
     Layer,
     RangeSource,
+    Track,
 )
 
 logger = logging.getLogger(__name__)
@@ -169,6 +177,28 @@ def is_under_resolved(
     return width_px < min_target_px
 
 
+def is_range_estimate_unreliable(track: Track, intrinsics: CameraIntrinsics) -> bool:
+    """True when a track's own bounding box looks like a fragment of a
+    larger object rather than the whole target -- small yet highly
+    confident, or an aspect ratio no printed model's silhouette would
+    produce (see IMPLAUSIBLE_RANGE_* in core/config.py). Its range
+    estimate is not wrong in the sense of a bug -- size-based range
+    (_size_range_m) assumes the box covers the whole model, and even a
+    depth-derived range samples a window centred on the fragment's own,
+    wrong centroid -- it is simply meaningless. Display-only: this never
+    gates engagement, and is checked independently of range_source.
+    """
+    width_px = (track.bbox[2] - track.bbox[0]) * intrinsics.width
+    height_px = (track.bbox[3] - track.bbox[1]) * intrinsics.height
+    if width_px <= 0.0 or height_px <= 0.0:
+        return False
+    if width_px < IMPLAUSIBLE_RANGE_MAX_PX and track.confidence >= IMPLAUSIBLE_RANGE_MIN_CONFIDENCE:
+        return True
+    aspect_ratio = max(width_px, height_px) / min(width_px, height_px)
+    lo, hi = IMPLAUSIBLE_RANGE_ASPECT_RATIO_RANGE
+    return not (lo <= aspect_ratio <= hi)
+
+
 def compute_min_area_px(
     intrinsics: CameraIntrinsics,
     max_range_m: float = MAX_ENGAGEMENT_RANGE_M,
@@ -230,6 +260,18 @@ class ColorDetector:
     def __init__(self, config: ColorDetectorConfig | None = None) -> None:
         self.config = config or ColorDetectorConfig()
         self._last_logged_min_area_px: int | None = None
+        # known_sizes_m is a theoretical assumption (see the module's own
+        # "Physical measurements still outstanding" entry in CLAUDE.md),
+        # not a measurement -- if the printed models were scaled down for
+        # a desktop printer, every size-derived range is wrong by exactly
+        # that factor, silently. Logged once at construction so the
+        # mismatch is visible rather than discovered downstream in a
+        # wrong range reading.
+        logger.info(
+            "L2 detector: assumed target sizes (m) = %s -- verify these match "
+            "the printed models as actually produced, not the spec",
+            self.config.known_sizes_m,
+        )
 
     def detect(
         self, frame: Frame, debug: bool = False
@@ -442,6 +484,257 @@ class ColorDetector:
             source_layer=Layer.L2,
             iff=color_class.iff,
         )
+
+
+# --- eyedropper calibration ---
+# The tuning window's most useful addition: instead of guessing HSV
+# thresholds against a hex-derived theory (see CLAUDE.md's "Physical
+# measurements still outstanding"), the operator samples the actual
+# printed model under the actual venue lighting and the detector derives
+# its thresholds from those pixels.
+
+# Below this linear hue spread (in OpenCV's 0-179 H units), a sample is
+# already a tight, non-wrapping cluster -- no need to even check for
+# wraparound. Above it, a genuinely wide/multi-coloured sample and a
+# tight cluster straddling the 0/180 seam both show a large linear
+# spread, so the circular check below is what actually tells them apart.
+_HUE_WRAP_LINEAR_SPREAD_THRESHOLD = 90.0
+# Mean resultant vector length (0 = uniformly spread around the circle,
+# 1 = a single point) above which a wide-looking linear spread is judged
+# to actually be a tight circular cluster, i.e. a wraparound rather than
+# a genuinely multi-hued sample.
+_HUE_WRAP_RESULTANT_THRESHOLD = 0.5
+_DEFAULT_SAMPLE_MARGIN = 0.15
+# A sample taken from a perfectly uniform patch (zero measured hue
+# spread -- a real risk against a flat-lit or computer-generated swatch,
+# confirmed empirically against SyntheticSource's own flat-fill targets)
+# would otherwise derive a single-hue-value range: proportional padding
+# (margin * span) is 0 when span is 0. A real camera always has some
+# sensor/compression noise even on a uniform surface, so this floor is
+# accounting for that inherent measurement noise, not guessing a wider
+# range than what was actually observed.
+_MIN_HUE_PAD = 2.0
+
+
+@dataclass(frozen=True)
+class ColorSample:
+    """Percentile statistics from one eyedropper sample -- percentiles,
+    not min/max, so a single stray outlier pixel (sensor noise, an
+    anti-aliased edge pixel) cannot widen the derived range.
+
+    ``hue_median``/``hue_p5``/``hue_p95`` are reported in a *shifted*
+    domain when ``hue_wraps`` is true: every raw hue below 90 has 180
+    added to it before the percentiles are computed, so a cluster that
+    straddles the real 0/180 seam (red) becomes one contiguous interval
+    instead of one that appears to span the whole axis. ``derive_
+    thresholds`` knows how to split that shifted interval back into the
+    two real hue ranges it actually covers -- callers that want the
+    plain real-domain value should take ``hue_median % 180`` etc.
+    themselves.
+    """
+
+    hue_median: float
+    hue_p5: float
+    hue_p95: float
+    sat_median: float
+    sat_p5: float
+    val_median: float
+    val_p5: float
+    pixel_count: int
+    hue_wraps: bool
+
+
+_EMPTY_SAMPLE = ColorSample(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0, False)
+
+
+def _hue_wraps_around(hue: np.ndarray) -> bool:
+    """Circular, not linear, spread is what actually distinguishes a
+    sample that straddles the 0/180 seam from one that is genuinely
+    multi-hued -- both look identical under a plain max-min or
+    percentile spread on the raw values. Getting this wrong in either
+    direction is exactly the failure mode to avoid: missing a real wrap
+    produces one derived range spanning nearly the whole hue axis
+    (matches everything); falsely detecting one on a genuinely wide
+    sample would incorrectly split it in two.
+    """
+    if hue.size == 0:
+        return False
+    linear_spread = float(np.percentile(hue, 95) - np.percentile(hue, 5))
+    if linear_spread < _HUE_WRAP_LINEAR_SPREAD_THRESHOLD:
+        return False
+    angles = hue * (2.0 * math.pi / 180.0)
+    mean_cos = float(np.mean(np.cos(angles)))
+    mean_sin = float(np.mean(np.sin(angles)))
+    resultant = math.hypot(mean_cos, mean_sin)
+    return resultant > _HUE_WRAP_RESULTANT_THRESHOLD
+
+
+def _sample_from_pixels(hsv_pixels: np.ndarray) -> ColorSample:
+    """``hsv_pixels`` is an (N, 3) array of raw HSV pixel values, in
+    whatever pixel order/shape they were extracted -- a circular
+    eyedropper click and a rectangular drag both funnel into this one
+    statistics computation so they agree exactly on a uniform region
+    (only the pixel *selection* differs between the two call sites).
+    """
+    if hsv_pixels.size == 0:
+        return _EMPTY_SAMPLE
+    hue = hsv_pixels[:, 0].astype(np.float64)
+    sat = hsv_pixels[:, 1].astype(np.float64)
+    val = hsv_pixels[:, 2].astype(np.float64)
+
+    wraps = _hue_wraps_around(hue)
+    hue_for_stats = np.where(hue < 90.0, hue + 180.0, hue) if wraps else hue
+
+    return ColorSample(
+        hue_median=float(np.median(hue_for_stats)),
+        hue_p5=float(np.percentile(hue_for_stats, 5)),
+        hue_p95=float(np.percentile(hue_for_stats, 95)),
+        sat_median=float(np.median(sat)),
+        sat_p5=float(np.percentile(sat, 5)),
+        val_median=float(np.median(val)),
+        val_p5=float(np.percentile(val, 5)),
+        pixel_count=int(hsv_pixels.shape[0]),
+        hue_wraps=wraps,
+    )
+
+
+def sample_region(
+    frame: Frame, center_norm: tuple[float, float], radius_px: int = 15
+) -> ColorSample:
+    """Circular eyedropper sample centred on one clicked point.
+    ``center_norm`` is normalised (x, y), matching every other bbox/point
+    convention in this codebase; ``radius_px`` is real image pixels, not
+    normalised, since a calibration click has a fixed physical purpose
+    (how large a patch of the model to average) independent of frame
+    resolution.
+    """
+    height, width = frame.image.shape[:2]
+    cx = int(round(center_norm[0] * width))
+    cy = int(round(center_norm[1] * height))
+    y0, y1 = max(0, cy - radius_px), min(height, cy + radius_px + 1)
+    x0, x1 = max(0, cx - radius_px), min(width, cx + radius_px + 1)
+    patch = frame.image[y0:y1, x0:x1]
+    if patch.size == 0:
+        return _EMPTY_SAMPLE
+    yy, xx = np.mgrid[y0:y1, x0:x1]
+    circular_mask = (xx - cx) ** 2 + (yy - cy) ** 2 <= radius_px**2
+    hsv_patch = cv2.cvtColor(patch, cv2.COLOR_BGR2HSV)
+    return _sample_from_pixels(hsv_patch[circular_mask])
+
+
+def sample_rectangle(frame: Frame, roi_norm: BoundingBox) -> ColorSample:
+    """Rectangular eyedropper sample from a drag -- the same statistics
+    as ``sample_region``, over every pixel in the rectangle rather than a
+    circle, so the two agree exactly for a uniform region.
+    """
+    height, width = frame.image.shape[:2]
+    x1n, y1n, x2n, y2n = roi_norm
+    x0, y0 = int(round(x1n * width)), int(round(y1n * height))
+    x1, y1 = int(round(x2n * width)), int(round(y2n * height))
+    patch = frame.image[y0:y1, x0:x1]
+    if patch.size == 0:
+        return _EMPTY_SAMPLE
+    hsv_patch = cv2.cvtColor(patch, cv2.COLOR_BGR2HSV)
+    return _sample_from_pixels(hsv_patch.reshape(-1, 3))
+
+
+def derive_thresholds(
+    sample: ColorSample, margin: float = _DEFAULT_SAMPLE_MARGIN
+) -> tuple[tuple[tuple[int, int], ...], int, int]:
+    """(hue_ranges, sat_min, val_min) derived from a sample, widened by a
+    safety margin: the hue interval is padded outward by ``margin`` of
+    its own span on each side, and sat_min/val_min are each reduced by
+    ``margin`` of their own measured p5 value, so a sample taken under
+    slightly different lighting than the next frame still falls inside
+    the derived thresholds.
+
+    Returns *two* hue ranges, not one, when ``sample.hue_wraps`` is set
+    -- reporting one wide range spanning ``[hue_p5, hue_p95]`` in that
+    case would span nearly the entire hue axis and match everything,
+    exactly the failure mode a wraparound sample must avoid.
+    """
+    sat_min = max(0, round(sample.sat_p5 * (1.0 - margin)))
+    val_min = max(0, round(sample.val_p5 * (1.0 - margin)))
+
+    span = sample.hue_p95 - sample.hue_p5
+    pad = max(margin * span, _MIN_HUE_PAD)
+    lo = sample.hue_p5 - pad
+    hi = sample.hue_p95 + pad
+
+    if not sample.hue_wraps:
+        hue_ranges = ((max(0, round(lo)), min(179, round(hi))),)
+        return hue_ranges, sat_min, val_min
+
+    # Wrapped: lo/hi live in the shifted domain _sample_from_pixels used
+    # to detect the wrap (raw hue < 90 shifted by +180, so the cluster
+    # sits contiguously somewhere in roughly [90, 270)). Clamp to that
+    # domain before splitting: extreme padding on a tiny sample could
+    # otherwise push an endpoint past the shift point itself, which
+    # would need a second wrap to interpret correctly and is not a
+    # realistic calibration sample.
+    lo = max(90.0, lo)
+    hi = min(270.0, hi)
+    if lo < 180.0 <= hi:
+        range_high = (max(0, round(lo)), 179)
+        range_low = (0, min(179, round(hi - 180.0)))
+        return (range_high, range_low), sat_min, val_min
+    # Padding never actually crossed the seam (a very tight, barely-
+    # wrapping sample) -- one real range is enough.
+    unshift = lambda v: v - 180.0 if v >= 180.0 else v  # noqa: E731
+    hue_ranges = ((max(0, round(unshift(lo))), min(179, round(unshift(hi)))),)
+    return hue_ranges, sat_min, val_min
+
+
+@dataclass(frozen=True)
+class NegativeSampleReport:
+    """Whether one ``ColorClass`` currently accepts a "must not detect"
+    sample (skin, a wall, clothing), and if so, the cheaper of sat_min/
+    val_min to raise to exclude it -- "cheaper" meaning whichever is
+    already closer to excluding the sample, on the reasoning that a
+    smaller change is less likely to also exclude genuine targets whose
+    own saturation/value sits close to the negative sample's.
+    """
+
+    class_name: str
+    accepted: bool
+    tighten_field: Literal["sat_min", "val_min"] | None
+    suggested_value: int | None
+
+
+def check_negative_sample(
+    sample: ColorSample, config: ColorDetectorConfig
+) -> tuple[NegativeSampleReport, ...]:
+    """Turns "does this negative sample sit inside our thresholds" from
+    guesswork into a measurement -- see the module's own hex-vs-measured
+    HSV caveat. Checked against the sample's median (not every pixel):
+    a calibration sample is deliberately taken from a fairly uniform
+    patch, so the central tendency is what a real detection would key
+    off too.
+    """
+    reports = []
+    for color_class in config.classes:
+        real_hue = sample.hue_median % 180.0
+        hue_hits = any(lo <= real_hue <= hi for lo, hi in color_class.hue_ranges)
+        accepted = (
+            hue_hits
+            and sample.sat_median >= color_class.sat_min
+            and sample.val_median >= color_class.val_min
+        )
+        tighten_field: Literal["sat_min", "val_min"] | None = None
+        suggested_value: int | None = None
+        if accepted:
+            sat_gap = sample.sat_p5 - color_class.sat_min
+            val_gap = sample.val_p5 - color_class.val_min
+            if sat_gap <= val_gap:
+                tighten_field = "sat_min"
+                suggested_value = round(sample.sat_p5) + 1
+            else:
+                tighten_field = "val_min"
+                suggested_value = round(sample.val_p5) + 1
+        reports.append(
+            NegativeSampleReport(color_class.name, accepted, tighten_field, suggested_value)
+        )
+    return tuple(reports)
 
 
 # --- tuning preset persistence ---

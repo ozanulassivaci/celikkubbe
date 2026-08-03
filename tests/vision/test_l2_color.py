@@ -12,12 +12,17 @@ from celikkubbe.vision.l2_color import (
     ColorClass,
     ColorDetector,
     ColorDetectorConfig,
+    check_negative_sample,
     compute_min_area_px,
     config_from_dict,
     config_to_dict,
+    derive_thresholds,
+    is_range_estimate_unreliable,
     is_under_resolved,
     list_hsv_presets,
     load_hsv_preset,
+    sample_rectangle,
+    sample_region,
     save_hsv_preset,
 )
 from celikkubbe.vision.sources import (
@@ -29,6 +34,8 @@ from celikkubbe.vision.sources import (
     estimated_intrinsics,
     hex_to_bgr,
 )
+
+from ..factories import make_track
 
 WIDTH, HEIGHT = 320, 240
 
@@ -546,3 +553,167 @@ def test_list_hsv_presets_returns_sorted_stems(tmp_path) -> None:
 
 def test_list_hsv_presets_returns_empty_tuple_when_directory_is_missing(tmp_path) -> None:
     assert list_hsv_presets(tmp_path / "nope") == ()
+
+
+# --- eyedropper calibration ---
+
+
+def _uniform_frame(hue: int, sat: int = 200, val: int = 200, width: int = 20, height: int = 20):
+    hsv_img = np.full((height, width, 3), (hue, sat, val), dtype=np.uint8)
+    bgr = cv2.cvtColor(hsv_img, cv2.COLOR_HSV2BGR)
+    return Frame(
+        image=bgr,
+        t=0.0,
+        intrinsics=estimated_intrinsics(width, height),
+        has_depth=False,
+        depth=None,
+    )
+
+
+def test_sample_region_returns_expected_median_and_percentiles_for_a_uniform_patch() -> None:
+    frame = _uniform_frame(hue=98, sat=210, val=180)
+    sample = sample_region(frame, (0.5, 0.5), radius_px=8)
+    assert sample.hue_median == pytest.approx(98.0, abs=1.0)
+    assert sample.hue_p5 == pytest.approx(98.0, abs=1.0)
+    assert sample.hue_p95 == pytest.approx(98.0, abs=1.0)
+    assert sample.sat_median == pytest.approx(210.0, abs=1.0)
+    assert sample.val_median == pytest.approx(180.0, abs=1.0)
+    assert sample.pixel_count > 0
+    assert sample.hue_wraps is False
+
+
+def test_derived_thresholds_detect_the_sampled_patch() -> None:
+    frame = _uniform_frame(hue=98, sat=210, val=180)
+    sample = sample_region(frame, (0.5, 0.5), radius_px=8)
+    hue_ranges, sat_min, val_min = derive_thresholds(sample)
+
+    detector = ColorDetector(
+        ColorDetectorConfig(
+            classes=(ColorClass("sampled", IFF.HOSTILE, hue_ranges, sat_min, val_min),),
+        )
+    )
+    detections, _ = detector.detect(frame)
+    assert len(detections) == 1
+
+
+def test_zero_spread_sample_still_derives_a_non_degenerate_hue_range() -> None:
+    # A flat-filled synthetic patch (or a real photo of an evenly, flatly
+    # lit surface) can have literally zero measured hue spread -- caught
+    # empirically running the real eyedropper against SyntheticSource's
+    # own flat-colour targets, where the naive margin*span padding
+    # produced a single-hue-value range that visibly fragmented detection
+    # on the very next frame's slightly different pixel.
+    frame = _uniform_frame(hue=98, sat=210, val=180)
+    sample = sample_region(frame, (0.5, 0.5), radius_px=8)
+    assert sample.hue_p95 == sample.hue_p5  # confirms this sample is the zero-spread case
+
+    hue_ranges, _sat_min, _val_min = derive_thresholds(sample)
+
+    assert len(hue_ranges) == 1
+    lo, hi = hue_ranges[0]
+    assert hi > lo
+
+
+def test_hue_wraparound_sample_produces_two_ranges_not_one_spanning_everything() -> None:
+    # Half the patch at hue 2, half at hue 178 -- a real hostile-red
+    # sample straddling the 0/180 seam, not a genuinely multi-hued patch.
+    hsv_img = np.zeros((10, 20, 3), dtype=np.uint8)
+    hsv_img[:, :10] = (2, 200, 200)
+    hsv_img[:, 10:] = (178, 200, 200)
+    bgr = cv2.cvtColor(hsv_img, cv2.COLOR_HSV2BGR)
+    frame = Frame(
+        image=bgr, t=0.0, intrinsics=estimated_intrinsics(20, 10), has_depth=False, depth=None
+    )
+
+    sample = sample_rectangle(frame, (0.0, 0.0, 1.0, 1.0))
+    assert sample.hue_wraps is True
+
+    hue_ranges, _sat_min, _val_min = derive_thresholds(sample)
+    assert len(hue_ranges) == 2
+    # Neither range may span more than a small neighbourhood of the two
+    # sampled clusters -- the failure mode this must avoid is one range
+    # wide enough to match nearly every hue.
+    for lo, hi in hue_ranges:
+        assert hi - lo < 30
+
+
+def test_percentiles_ignore_stray_outlier_pixels() -> None:
+    height, width = 10, 10
+    hsv_img = np.full((height, width, 3), (98, 200, 200), dtype=np.uint8)
+    hsv_img[0, 0] = (5, 255, 255)  # one stray pixel, far from the rest
+    bgr = cv2.cvtColor(hsv_img, cv2.COLOR_HSV2BGR)
+    frame = Frame(
+        image=bgr,
+        t=0.0,
+        intrinsics=estimated_intrinsics(width, height),
+        has_depth=False,
+        depth=None,
+    )
+
+    sample = sample_rectangle(frame, (0.0, 0.0, 1.0, 1.0))
+    # A single outlier among 100 pixels must not widen p5/p95 -- min/max
+    # would have caught it, percentiles must not.
+    assert sample.hue_p5 == pytest.approx(98.0, abs=1.0)
+    assert sample.hue_p95 == pytest.approx(98.0, abs=1.0)
+
+
+def test_negative_sample_reports_acceptance_by_current_thresholds() -> None:
+    # A skin-tone-like sample sitting inside the default hostile range,
+    # matching the false-positive scenario that motivated this tool.
+    frame = _uniform_frame(hue=5, sat=120, val=220)
+    sample = sample_rectangle(frame, (0.0, 0.0, 1.0, 1.0))
+
+    reports = check_negative_sample(sample, ColorDetectorConfig())
+    hostile_report = next(r for r in reports if r.class_name == "hostile")
+    friendly_report = next(r for r in reports if r.class_name == "friendly")
+
+    assert hostile_report.accepted is True
+    assert hostile_report.tighten_field in ("sat_min", "val_min")
+    assert hostile_report.suggested_value is not None
+    assert friendly_report.accepted is False
+    assert friendly_report.tighten_field is None
+
+
+def test_negative_sample_outside_every_class_reports_not_accepted() -> None:
+    frame = _uniform_frame(hue=60, sat=50, val=50)  # a dim green, in neither class
+    sample = sample_rectangle(frame, (0.0, 0.0, 1.0, 1.0))
+    reports = check_negative_sample(sample, ColorDetectorConfig())
+    assert all(not r.accepted for r in reports)
+
+
+def test_point_click_and_rectangle_drag_agree_for_a_uniform_region() -> None:
+    frame = _uniform_frame(hue=3, sat=222, val=190, width=40, height=40)
+    point_sample = sample_region(frame, (0.5, 0.5), radius_px=10)
+    rect_sample = sample_rectangle(frame, (0.375, 0.375, 0.625, 0.625))
+
+    assert point_sample.hue_median == pytest.approx(rect_sample.hue_median, abs=1.0)
+    assert point_sample.sat_median == pytest.approx(rect_sample.sat_median, abs=1.0)
+    assert point_sample.val_median == pytest.approx(rect_sample.val_median, abs=1.0)
+    assert point_sample.hue_wraps == rect_sample.hue_wraps
+
+
+def test_sample_region_outside_frame_returns_empty_sample() -> None:
+    frame = _uniform_frame(hue=98)
+    sample = sample_region(frame, (5.0, 5.0), radius_px=5)
+    assert sample.pixel_count == 0
+
+
+# --- implausible range-estimate flagging ---
+
+
+def test_small_confident_bbox_flags_range_as_unreliable() -> None:
+    intr = estimated_intrinsics(640, 480)
+    tiny_confident = make_track(bbox=(0.5, 0.5, 0.52, 0.52), confidence=0.9)  # ~13px wide
+    assert is_range_estimate_unreliable(tiny_confident, intr) is True
+
+
+def test_normal_sized_bbox_is_not_flagged() -> None:
+    intr = estimated_intrinsics(640, 480)
+    normal = make_track(bbox=(0.3, 0.3, 0.5, 0.5), confidence=0.9)  # ~128px wide
+    assert is_range_estimate_unreliable(normal, intr) is False
+
+
+def test_extreme_aspect_ratio_flags_range_as_unreliable() -> None:
+    intr = estimated_intrinsics(640, 480)
+    sliver = make_track(bbox=(0.1, 0.1, 0.9, 0.12), confidence=0.9)  # very wide, very thin
+    assert is_range_estimate_unreliable(sliver, intr) is True
