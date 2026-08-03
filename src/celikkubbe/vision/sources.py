@@ -7,6 +7,7 @@ tracking, the demo pipeline) develops and tests against these instead.
 
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass
 
@@ -15,6 +16,22 @@ import numpy as np
 
 from celikkubbe.core.protocols import Clock
 from celikkubbe.core.types import CameraIntrinsics, Frame
+
+logger = logging.getLogger(__name__)
+
+# Many UVC webcams default to YUYV at higher resolutions, which caps FPS
+# well below 30 (confirmed against a real device via v4l2-ctl
+# --list-formats-ext: 1280x720 YUYV negotiates 10 fps, MJPG negotiates 30
+# fps at every resolution the device offers, 160x120 through 1280x720).
+# WebcamSource requests this explicitly rather than accepting whatever the
+# backend picks by default.
+_MJPG_FOURCC = cv2.VideoWriter_fourcc(*"MJPG")
+
+
+def _fourcc_to_str(value: float) -> str:
+    code = int(value)
+    return "".join(chr((code >> (8 * i)) & 0xFF) for i in range(4)).strip()
+
 
 # Stand-in horizontal FOV used to derive "estimated" intrinsics when no real
 # calibration exists (matches the D435i RGB stream, a reasonable default for
@@ -284,10 +301,24 @@ class WebcamSource:
         cap = cv2.VideoCapture(self._device)
         if not cap.isOpened():
             raise RuntimeError(f"could not open webcam device {self._device}")
+        # FOURCC before resolution: on V4L2, setting the pixel format after
+        # the resolution has been negotiated can leave the earlier
+        # (often YUYV) negotiation in place instead of re-negotiating.
+        cap.set(cv2.CAP_PROP_FOURCC, _MJPG_FOURCC)
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, self._requested_width)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self._requested_height)
         delivered_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         delivered_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        delivered_fourcc = _fourcc_to_str(cap.get(cv2.CAP_PROP_FOURCC))
+        delivered_fps = cap.get(cv2.CAP_PROP_FPS)
+        logger.info(
+            "webcam device %d negotiated %dx%d %s at %.1f fps",
+            self._device,
+            delivered_width,
+            delivered_height,
+            delivered_fourcc,
+            delivered_fps,
+        )
         self._intrinsics = estimated_intrinsics(delivered_width, delivered_height)
         self._cap = cap
 

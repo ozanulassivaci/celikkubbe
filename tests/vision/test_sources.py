@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import logging
 from unittest.mock import patch
 
+import cv2
 import numpy as np
 import pytest
 
@@ -157,11 +159,20 @@ def test_estimated_intrinsics_matches_worked_reference_pixel_sizes() -> None:
 class _FakeCv2Capture:
     """Minimal stand-in for cv2.VideoCapture, driven entirely in-memory."""
 
-    def __init__(self, frames: list[np.ndarray], fps: float, width: int, height: int) -> None:
+    def __init__(
+        self,
+        frames: list[np.ndarray],
+        fps: float,
+        width: int,
+        height: int,
+        fourcc: int = 0,
+    ) -> None:
         self._frames = frames
         self._fps = fps
         self._width = width
         self._height = height
+        self._fourcc = fourcc
+        self.requested_fourcc: int | None = None
         self._index = 0
         self._opened = True
         self.released = False
@@ -178,6 +189,8 @@ class _FakeCv2Capture:
             return float(self._width)
         if prop_id == cv2.CAP_PROP_FRAME_HEIGHT:
             return float(self._height)
+        if prop_id == cv2.CAP_PROP_FOURCC:
+            return float(self._fourcc)
         return 0.0
 
     def set(self, prop_id: int, value: float) -> bool:
@@ -185,6 +198,9 @@ class _FakeCv2Capture:
 
         if prop_id == cv2.CAP_PROP_POS_FRAMES:
             self._index = int(value)
+        elif prop_id == cv2.CAP_PROP_FOURCC:
+            self.requested_fourcc = int(value)
+            self._fourcc = int(value)
         return True
 
     def read(self) -> tuple[bool, np.ndarray | None]:
@@ -298,6 +314,33 @@ def test_webcam_source_reports_delivered_not_requested_resolution() -> None:
         source.start()
         assert source.intrinsics.width == 640
         assert source.intrinsics.height == 480
+
+
+def test_webcam_source_requests_mjpg_before_resolution() -> None:
+    # Confirmed against a real device (v4l2-ctl --list-formats-ext): YUYV
+    # at 1280x720 negotiates only 10 fps on hardware that supports MJPG
+    # at 30 fps at every resolution it offers. WebcamSource must request
+    # MJPG explicitly rather than accepting the backend's default.
+    fake_cap = _FakeCv2Capture(_fake_frames(1), fps=30.0, width=1280, height=720)
+    with patch("celikkubbe.vision.sources.cv2.VideoCapture", return_value=fake_cap):
+        source = WebcamSource(0, FakeClock())
+        source.start()
+        assert fake_cap.requested_fourcc == cv2.VideoWriter_fourcc(*"MJPG")
+
+
+def test_webcam_source_logs_the_negotiated_format(caplog) -> None:
+    caplog.set_level(logging.INFO, logger="celikkubbe.vision.sources")
+    fake_cap = _FakeCv2Capture(
+        _fake_frames(1), fps=30.0, width=1280, height=720, fourcc=cv2.VideoWriter_fourcc(*"MJPG")
+    )
+    with patch("celikkubbe.vision.sources.cv2.VideoCapture", return_value=fake_cap):
+        source = WebcamSource(0, FakeClock())
+        source.start()
+
+    assert any(
+        "1280x720" in record.message and "MJPG" in record.message and "30.0" in record.message
+        for record in caplog.records
+    )
 
 
 def test_webcam_source_has_no_depth() -> None:
