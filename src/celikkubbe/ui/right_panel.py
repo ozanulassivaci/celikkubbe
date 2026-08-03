@@ -61,6 +61,16 @@ _IFF_TEXT_COLOR: dict[IFF, str] = {
 }
 
 _MODE_CARD_HEIGHT_PX = 55
+# The widest row this panel ever lays out is the three-way stage selector
+# (_build_stage_selector) at ~259px including margins -- measured via the
+# scroll area's own container sizeHint, not guessed. A minimum matching
+# the left panel's own value (220, see MainWindow) is narrower than that,
+# so the stage buttons ("AŞAMA 3"), the homing row ("SIFIRLA TİLT") and
+# the locked-target confidence label all clip once the splitter actually
+# gives this panel less than its natural content width. A little
+# headroom over the measured 259px for font-metric variance across
+# systems.
+_MIN_PANEL_WIDTH_PX = 270
 
 
 def compute_fire_enabled(snapshot: UiSnapshot) -> tuple[bool, str | None]:
@@ -98,6 +108,7 @@ class RightPanel(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setProperty("role", "panel")
+        self.setMinimumWidth(_MIN_PANEL_WIDTH_PX)
         self._rendered_stage: Stage | None = None
         self._mode_card_buttons: dict[Layer, QPushButton] = {}
         self._jog_active = False
@@ -416,6 +427,14 @@ class RightPanel(QWidget):
         self._locked_target_label.setStyleSheet(
             f"color: {_IFF_TEXT_COLOR[track.iff]}; font-weight: 600;"
         )
+        # Unlike _set_warning_text, this label's own width follows a
+        # stretch in a QHBoxLayout -- it is not externally fixed, so
+        # eliding against label.width() would elide against whatever
+        # (possibly near-zero) width its *previous* text left it with,
+        # and a label that ever went empty would stay stuck empty
+        # forever. The panel's own minimum width (_MIN_PANEL_WIDTH_PX)
+        # is what actually keeps this row from being squeezed in the
+        # first place -- see this module's own docstring on why.
         self._locked_confidence_label.setText(f"{track.confidence:.0%}")
 
     def _update_warning_line(

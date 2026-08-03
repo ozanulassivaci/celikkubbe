@@ -22,7 +22,7 @@ from celikkubbe.core.types import (
     ReasonCode,
     Stage,
 )
-from celikkubbe.ui.right_panel import RightPanel, compute_fire_enabled
+from celikkubbe.ui.right_panel import _MIN_PANEL_WIDTH_PX, RightPanel, compute_fire_enabled
 from celikkubbe.ui.snapshot import HealthSnapshot, PipelineTimings, UiSnapshot
 
 from ..factories import make_state, make_telemetry, make_track
@@ -172,6 +172,22 @@ def test_compute_fire_enabled_true_when_s4_and_gates_pass() -> None:
     enabled, reason = compute_fire_enabled(snapshot)
     assert enabled is True
     assert reason is None
+
+
+# --- widget: layout ---
+
+
+def test_panel_minimum_width_fits_the_widest_row(qtbot) -> None:
+    """Regression test: a minimum narrower than the stage selector's own
+    natural width clipped "AŞAMA 3", "SIFIRLA TİLT" and the locked-target
+    confidence label once the splitter actually gave this panel less than
+    it needed (see right_panel.py's own _MIN_PANEL_WIDTH_PX docstring).
+    """
+    panel = RightPanel()
+    qtbot.addWidget(panel)
+    stage_row_width = sum(btn.sizeHint().width() for btn in panel._stage_buttons.values())
+    assert panel.minimumWidth() == _MIN_PANEL_WIDTH_PX
+    assert panel.minimumWidth() > stage_row_width
 
 
 # --- widget: pinned safety region ---

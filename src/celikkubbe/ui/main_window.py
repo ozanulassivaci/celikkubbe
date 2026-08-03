@@ -1,10 +1,12 @@
 """MainWindow: the application shell.
 
-Title bar, three-column splitter (LeftPanel / VideoCanvas / RightPanel),
-the status strip, and the two full-window overlays -- wired to a
-PipelineWorker this window owns. Nothing in this module reads a camera,
-a serial port, or runs inference -- the GUI thread only ever paints and
-reacts to signals emitted from PipelineWorker's own thread.
+Three-column splitter (LeftPanel / VideoCanvas / RightPanel), the status
+strip, and the two full-window overlays -- wired to a PipelineWorker this
+window owns. Nothing in this module reads a camera, a serial port, or
+runs inference -- the GUI thread only ever paints and reacts to signals
+emitted from PipelineWorker's own thread. The product name lives only in
+the OS window title bar (setWindowTitle) -- no in-app title row -- and
+the version string lives in the status strip instead.
 """
 
 from __future__ import annotations
@@ -12,7 +14,6 @@ from __future__ import annotations
 from PyQt6.QtCore import QEvent, Qt, QTimer
 from PyQt6.QtWidgets import (
     QApplication,
-    QFrame,
     QHBoxLayout,
     QLabel,
     QMainWindow,
@@ -40,7 +41,6 @@ from celikkubbe.ui.tuning_window import TuningWindow
 from celikkubbe.ui.video_canvas import VideoCanvas
 
 _STATUS_STRIP_HEIGHT_PX = 28
-_TITLE_BAR_HEIGHT_PX = 36
 _ERROR_TOAST_MS = 5000
 # A manual click-to-aim point has no detected size, so it is represented
 # as a zero-area bbox exactly at the click -- AimSolver only ever reads
@@ -171,6 +171,13 @@ class StatusStrip(QWidget):
         self._error_label = self._add_text_label(layout, "")
 
         layout.addStretch(1)
+        # Moved here from the now-removed in-app title row -- this is the
+        # only place the version string is shown; the window title bar
+        # itself (see MainWindow.__init__) carries the product name.
+        version_label = QLabel(f"v{__version__}")
+        version_label.setStyleSheet(f"color: {theme.TEXT_DIM};")
+        layout.addWidget(version_label)
+
         self._error_timer = QTimer(self)
         self._error_timer.setSingleShot(True)
         self._error_timer.timeout.connect(lambda: self._error_label.setText(""))
@@ -261,24 +268,6 @@ class StatusStrip(QWidget):
         self._gamepad_label.setStyleSheet(f"color: {theme.OK if connected else theme.TEXT_DIM};")
 
 
-def _build_title_bar() -> QFrame:
-    bar = QFrame()
-    bar.setFixedHeight(_TITLE_BAR_HEIGHT_PX)
-    bar.setProperty("role", "panel")
-    layout = QHBoxLayout(bar)
-
-    version_label = QLabel(f"v{__version__}")
-    version_label.setStyleSheet(f"color: {theme.TEXT_DIM};")
-    layout.addWidget(version_label)
-    layout.addStretch(1)
-
-    title_label = QLabel("ÇELİKKUBBE")
-    title_label.setStyleSheet(f"color: {theme.TEXT_PRIMARY}; font-weight: 600; font-size: 12pt;")
-    layout.addWidget(title_label)
-    layout.addStretch(1)
-    return bar
-
-
 def _build_dev_mode_banner() -> QLabel:
     """A permanent, full-width red strip -- not an overlay, not a toast,
     never hidden or throttled. dev_mode disables real safety checks (see
@@ -313,7 +302,7 @@ class MainWindow(QMainWindow):
         self._held_jog_key: int | None = None
         self._tuning_window: TuningWindow | None = None
 
-        self.setWindowTitle("Çelikkubbe")
+        self.setWindowTitle("OZU IEEE RAS ÇELİKKUBBE")
         self.resize(1400, 800)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
@@ -322,7 +311,6 @@ class MainWindow(QMainWindow):
         outer = QVBoxLayout(central)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
-        outer.addWidget(_build_title_bar())
         if self._worker.dev_mode:
             outer.addWidget(_build_dev_mode_banner())
 
@@ -331,8 +319,7 @@ class MainWindow(QMainWindow):
         self._left_panel.setMinimumWidth(220)
         self._canvas = VideoCanvas()
         self._canvas.set_source_label(source_label)
-        self._right_panel = RightPanel()
-        self._right_panel.setMinimumWidth(220)
+        self._right_panel = RightPanel()  # owns its own minimum width -- see right_panel.py
         splitter.addWidget(self._left_panel)
         splitter.addWidget(self._canvas)
         splitter.addWidget(self._right_panel)
