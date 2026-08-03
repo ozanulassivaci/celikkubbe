@@ -7,18 +7,38 @@ so a mock detector would not actually exercise it.
 
 from __future__ import annotations
 
+import cv2
+import numpy as np
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QPixmap
 
 from celikkubbe.core.clock import FakeClock
 from celikkubbe.core.strings import UI_LABEL_TR
+from celikkubbe.core.types import Frame
 from celikkubbe.io.sim_link import SimTurretLink
 from celikkubbe.ui.pipeline_worker import PipelineWorker
-from celikkubbe.ui.tuning_window import TuningWindow, _PreviewWidget, normalize_drag_to_roi
+from celikkubbe.ui.tuning_window import (
+    TuningWindow,
+    _PreviewWidget,
+    coerce_hue_range_count,
+    normalize_drag_to_roi,
+)
 from celikkubbe.vision.l2_color import ColorDetectorConfig, Contour, DebugMasks
-from celikkubbe.vision.sources import SyntheticSource, SyntheticSourceConfig
+from celikkubbe.vision.sources import SyntheticSource, SyntheticSourceConfig, estimated_intrinsics
 
 _TICK_DT = 1.0 / 30.0
+
+
+def _uniform_frame(hue: int, sat: int = 200, val: int = 200, width: int = 20, height: int = 20):
+    hsv_img = np.full((height, width, 3), (hue, sat, val), dtype=np.uint8)
+    bgr = cv2.cvtColor(hsv_img, cv2.COLOR_HSV2BGR)
+    return Frame(
+        image=bgr,
+        t=0.0,
+        intrinsics=estimated_intrinsics(width, height),
+        has_depth=False,
+        depth=None,
+    )
 
 
 def _make_worker(clock: FakeClock, num_targets: int = 1) -> PipelineWorker:
@@ -375,3 +395,163 @@ def test_clear_roi_resets_the_detectors_roi_to_none(qtbot):
     window._on_clear_roi()
 
     assert worker.detector.config.roi is None
+
+
+# --- coerce_hue_range_count ---
+
+
+def test_coerce_hue_range_count_leaves_a_matching_count_untouched() -> None:
+    assert coerce_hue_range_count(((0, 10), (170, 179)), 2) == ((0, 10), (170, 179))
+
+
+def test_coerce_hue_range_count_pads_by_repeating_the_last_range() -> None:
+    assert coerce_hue_range_count(((90, 108),), 2) == ((90, 108), (90, 108))
+
+
+def test_coerce_hue_range_count_truncates_extra_ranges() -> None:
+    assert coerce_hue_range_count(((0, 10), (170, 179)), 1) == ((0, 10),)
+
+
+# --- eyedropper: positive sample ---
+# window._latest_frame is set directly rather than through a real tick --
+# the point is to exercise sampling/apply/cancel with a known, uniform
+# HSV patch, not the pipeline's own detection loop (already covered by
+# test_l2_color.py's own sample_region/derive_thresholds tests).
+
+
+def test_positive_point_sample_populates_pending_result_and_enables_apply(qtbot):
+    clock = FakeClock()
+    worker = _make_worker(clock)
+    window = TuningWindow(worker)
+    qtbot.addWidget(window)
+    window._latest_frame = _uniform_frame(hue=98, sat=210, val=180)
+    window._eyedropper_buttons["positive"].click()
+
+    window._on_point_clicked((0.5, 0.5))
+
+    assert window._pending_sample is not None
+    class_name, hue_ranges, sat_min, val_min = window._pending_sample
+    assert class_name == "hostile"  # the default selection in _class_combo
+    assert len(hue_ranges) == 2  # hostile's slider layout always has 2 rows
+    assert sat_min <= 210
+    assert val_min <= 180
+    assert window._eyedropper_apply_btn.isEnabled()
+    assert window._eyedropper_cancel_btn.isEnabled()
+    assert "98" in window._eyedropper_result_label.text()
+
+
+def test_eyedropper_off_mode_ignores_point_clicks(qtbot):
+    clock = FakeClock()
+    worker = _make_worker(clock)
+    window = TuningWindow(worker)
+    qtbot.addWidget(window)
+    window._latest_frame = _uniform_frame(hue=98)
+
+    window._on_point_clicked((0.5, 0.5))
+
+    assert window._pending_sample is None
+    assert window._eyedropper_result_label.text() == ""
+
+
+def test_eyedropper_apply_sets_the_selected_classs_thresholds_and_resyncs_sliders(qtbot):
+    clock = FakeClock()
+    worker = _make_worker(clock)
+    window = TuningWindow(worker)
+    qtbot.addWidget(window)
+    window._latest_frame = _uniform_frame(hue=98, sat=210, val=180)
+    window._eyedropper_buttons["positive"].click()
+    window._on_point_clicked((0.5, 0.5))
+
+    window._on_eyedropper_apply()
+
+    hostile = next(c for c in worker.detector.config.classes if c.name == "hostile")
+    assert hostile.hue_ranges[0][0] <= 98 <= hostile.hue_ranges[0][1]
+    assert window._sliders["hostile_hue0_lo"][0].value() == hostile.hue_ranges[0][0]
+    assert window._sliders["hostile_sat"][0].value() == hostile.sat_min
+    assert window._pending_sample is None
+    assert not window._eyedropper_apply_btn.isEnabled()
+
+
+def test_eyedropper_cancel_discards_the_pending_sample_without_touching_the_detector(qtbot):
+    clock = FakeClock()
+    worker = _make_worker(clock)
+    window = TuningWindow(worker)
+    qtbot.addWidget(window)
+    before = worker.detector.config
+    window._latest_frame = _uniform_frame(hue=98, sat=210, val=180)
+    window._eyedropper_buttons["positive"].click()
+    window._on_point_clicked((0.5, 0.5))
+
+    window._on_eyedropper_cancel()
+
+    assert worker.detector.config is before
+    assert window._pending_sample is None
+    assert window._eyedropper_result_label.text() == ""
+    assert not window._eyedropper_apply_btn.isEnabled()
+
+
+def test_switching_eyedropper_mode_clears_a_pending_sample(qtbot):
+    clock = FakeClock()
+    worker = _make_worker(clock)
+    window = TuningWindow(worker)
+    qtbot.addWidget(window)
+    window._latest_frame = _uniform_frame(hue=98, sat=210, val=180)
+    window._eyedropper_buttons["positive"].click()
+    window._on_point_clicked((0.5, 0.5))
+    assert window._pending_sample is not None
+
+    window._eyedropper_buttons["off"].click()
+
+    assert window._pending_sample is None
+    assert window._eyedropper_result_label.text() == ""
+
+
+def test_dragging_while_positive_mode_active_samples_a_rectangle_instead_of_setting_roi(qtbot):
+    clock = FakeClock()
+    worker = _make_worker(clock)
+    window = TuningWindow(worker)
+    qtbot.addWidget(window)
+    window._latest_frame = _uniform_frame(hue=98, sat=210, val=180)
+    window._eyedropper_buttons["positive"].click()
+
+    window._on_roi_dragged((0.1, 0.1, 0.9, 0.9))
+
+    assert worker.detector.config.roi is None
+    assert window._pending_sample is not None
+
+
+# --- eyedropper: negative sample ---
+
+
+def test_negative_sample_reports_a_class_that_currently_accepts_it(qtbot):
+    clock = FakeClock()
+    worker = _make_worker(clock)
+    window = TuningWindow(worker)
+    qtbot.addWidget(window)
+    # Skin-tone hue sits inside the default hostile red band and above
+    # its sat/val floors -- exactly the false-positive scenario the
+    # negative-sample tool exists to catch (see l2_color's own docstring
+    # on the confirmed hostile hue range).
+    window._latest_frame = _uniform_frame(hue=5, sat=150, val=200)
+    window._eyedropper_buttons["negative"].click()
+
+    window._on_point_clicked((0.5, 0.5))
+
+    assert window._pending_sample is None  # nothing to apply for a negative sample
+    assert not window._eyedropper_apply_btn.isEnabled()
+    assert window._eyedropper_cancel_btn.isEnabled()
+    assert "KABUL" in window._eyedropper_result_label.text()
+
+
+def test_negative_sample_reports_a_class_that_does_not_accept_it(qtbot):
+    clock = FakeClock()
+    worker = _make_worker(clock)
+    window = TuningWindow(worker)
+    qtbot.addWidget(window)
+    # Low saturation grey, far outside every default class's thresholds.
+    window._latest_frame = _uniform_frame(hue=98, sat=10, val=200)
+    window._eyedropper_buttons["negative"].click()
+
+    window._on_point_clicked((0.5, 0.5))
+
+    assert "reddediyor" in window._eyedropper_result_label.text()

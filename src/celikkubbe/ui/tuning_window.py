@@ -24,6 +24,7 @@ import cv2
 from PyQt6.QtCore import QPointF, QRectF, Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QMouseEvent, QPainter, QPaintEvent, QPen, QPixmap
 from PyQt6.QtWidgets import (
+    QButtonGroup,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -47,9 +48,14 @@ from celikkubbe.ui.video_canvas import LetterboxTransform, compute_letterbox, fr
 from celikkubbe.vision.l2_color import (
     DEFAULT_HSV_PRESETS_DIR,
     ColorDetectorConfig,
+    ColorSample,
     DebugMasks,
+    check_negative_sample,
+    derive_thresholds,
     list_hsv_presets,
     load_hsv_preset,
+    sample_rectangle,
+    sample_region,
     save_hsv_preset,
 )
 
@@ -79,6 +85,38 @@ _PREVIEW_MODE_LABEL_KEY = {
 # line up with anything.
 _ROI_DRAG_MODES = ("source", "contours")
 
+# Eyedropper calibration -- see l2_color.sample_region/sample_rectangle/
+# derive_thresholds/check_negative_sample, the pure primitives this UI
+# wires up. "off" leaves the preview's own click/drag interaction doing
+# what it always did (ROI dragging); "positive" and "negative" both
+# reuse that same click=point/drag=rectangle interaction to sample
+# instead, never simultaneously with ROI dragging.
+_EYEDROPPER_MODES = ("off", "positive", "negative")
+_EYEDROPPER_MODE_LABEL_KEY = {
+    "off": "EYEDROPPER_OFF",
+    "positive": "EYEDROPPER_POSITIVE",
+    "negative": "EYEDROPPER_NEGATIVE",
+}
+_TIGHTEN_FIELD_LABEL_KEY = {"sat_min": "SAT_MIN_LABEL", "val_min": "VAL_MIN_LABEL"}
+
+
+def coerce_hue_range_count(
+    hue_ranges: tuple[tuple[int, int], ...], count: int
+) -> tuple[tuple[int, int], ...]:
+    """derive_thresholds returns however many hue ranges the sample
+    actually needs (one, or two if it wrapped) -- but this window's
+    sliders are laid out with a fixed number of rows per class (2 for
+    hostile, 1 for friendly, see _build_class_group), decided once at
+    construction time. Padding by repeating the last range (rather than
+    a degenerate (0, 0), which would still match hue=0 exactly) keeps
+    the applied config's actual coverage unchanged when fewer ranges
+    were produced than slots exist.
+    """
+    ranges = list(hue_ranges[:count])
+    while len(ranges) < count:
+        ranges.append(ranges[-1] if ranges else (0, 179))
+    return tuple(ranges)
+
 
 def normalize_drag_to_roi(p1: tuple[float, float], p2: tuple[float, float]) -> BoundingBox | None:
     """Two normalised drag endpoints -> a clamped (x1,y1,x2,y2), or None
@@ -102,6 +140,13 @@ class _PreviewWidget(QWidget):
     """
 
     roi_dragged = pyqtSignal(tuple)
+    # Emitted instead of roi_dragged when a press/release pair was too
+    # small a drag to be an intentional ROI (see normalize_drag_to_roi) --
+    # previously silently dropped, since nothing needed a plain click.
+    # The eyedropper's point-sample mode needs exactly this: a click, not
+    # a drag, is what sample_region's own point-vs-rectangle distinction
+    # calls for.
+    point_clicked = pyqtSignal(tuple)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -187,6 +232,8 @@ class _PreviewWidget(QWidget):
         roi = normalize_drag_to_roi(p1, p2)
         if roi is not None:
             self.roi_dragged.emit(roi)
+        else:
+            self.point_clicked.emit(p1)
 
 
 def _slider_row(label_text: str, lo: int, hi: int, value: int) -> tuple[QWidget, QSlider, QLabel]:
@@ -225,6 +272,12 @@ class TuningWindow(QDialog):
         self._latest_debug: DebugMasks | None = None
         self._last_preview_t: float | None = None
         self._sliders: dict[str, tuple[QSlider, QLabel]] = {}
+        self._eyedropper_mode = "off"
+        # (class_name, hue_ranges, sat_min, val_min) awaiting EYEDROPPER_APPLY,
+        # or None -- see _show_positive_sample/_on_eyedropper_apply. Only a
+        # positive sample ever has anything pending; a negative sample is
+        # purely a report, nothing to apply.
+        self._pending_sample: tuple[str, tuple[tuple[int, int], ...], int, int] | None = None
 
         outer = QHBoxLayout(self)
         outer.addWidget(self._build_controls(), stretch=0)
@@ -369,12 +422,61 @@ class TuningWindow(QDialog):
         mode_row.addStretch(1)
         layout.addLayout(mode_row)
 
+        layout.addLayout(self._build_eyedropper_row())
+
         self._preview = _PreviewWidget()
         self._preview.roi_dragged.connect(self._on_roi_dragged)
+        self._preview.point_clicked.connect(self._on_point_clicked)
         layout.addWidget(self._preview, stretch=1)
 
         self._counts_label = QLabel("")
         layout.addWidget(self._counts_label)
+        layout.addWidget(self._build_eyedropper_result_panel())
+        return container
+
+    def _build_eyedropper_row(self) -> QHBoxLayout:
+        # Positive samples target whichever class is selected in
+        # self._class_combo above -- deliberately the same combo the
+        # hsv/morphed mask preview already uses, so "hostile selected"
+        # means the same thing in both places rather than a second,
+        # independent class picker.
+        row = QHBoxLayout()
+        row.addWidget(QLabel(UI_LABEL_TR["EYEDROPPER_HINT"]))
+        row.addStretch(1)
+        self._eyedropper_buttons: dict[str, QPushButton] = {}
+        group = QButtonGroup(self)
+        group.setExclusive(True)
+        for mode in _EYEDROPPER_MODES:
+            btn = QPushButton(UI_LABEL_TR[_EYEDROPPER_MODE_LABEL_KEY[mode]])
+            btn.setCheckable(True)
+            is_off = mode == "off"
+            btn.setChecked(is_off)
+            if is_off:
+                btn.setStyleSheet(
+                    f"background-color: {theme.WARN}; border-color: {theme.WARN}; "
+                    f"color: {theme.BG_BASE};"
+                )
+            btn.clicked.connect(lambda _checked=False, m=mode: self._set_eyedropper_mode(m))
+            group.addButton(btn)
+            self._eyedropper_buttons[mode] = btn
+            row.addWidget(btn)
+        return row
+
+    def _build_eyedropper_result_panel(self) -> QWidget:
+        container = QWidget()
+        layout = QHBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self._eyedropper_result_label = QLabel("")
+        self._eyedropper_result_label.setWordWrap(True)
+        layout.addWidget(self._eyedropper_result_label, stretch=1)
+        self._eyedropper_apply_btn = QPushButton(UI_LABEL_TR["EYEDROPPER_APPLY"])
+        self._eyedropper_apply_btn.setEnabled(False)
+        self._eyedropper_apply_btn.clicked.connect(self._on_eyedropper_apply)
+        layout.addWidget(self._eyedropper_apply_btn)
+        self._eyedropper_cancel_btn = QPushButton(UI_LABEL_TR["EYEDROPPER_CANCEL"])
+        self._eyedropper_cancel_btn.setEnabled(False)
+        self._eyedropper_cancel_btn.clicked.connect(self._on_eyedropper_cancel)
+        layout.addWidget(self._eyedropper_cancel_btn)
         return container
 
     # --- live-apply: global fields ---
@@ -429,12 +531,118 @@ class TuningWindow(QDialog):
         self._apply_config(dataclasses.replace(self._working_config, classes=classes))
 
     # --- ROI ---
+    # While an eyedropper mode is active, the preview's own click/drag
+    # interaction means "take a sample", not "set the ROI" -- the two
+    # must never both react to the same drag.
 
     def _on_roi_dragged(self, roi: BoundingBox) -> None:
-        self._apply_config(dataclasses.replace(self._working_config, roi=roi))
+        if self._eyedropper_mode == "off":
+            self._apply_config(dataclasses.replace(self._working_config, roi=roi))
+            return
+        self._sample_and_show(lambda frame: sample_rectangle(frame, roi))
 
     def _on_clear_roi(self) -> None:
         self._apply_config(dataclasses.replace(self._working_config, roi=None))
+
+    # --- eyedropper calibration ---
+
+    def _set_eyedropper_mode(self, mode: str) -> None:
+        self._eyedropper_mode = mode
+        self._clear_pending_sample()
+        # QPushButton:checked has no distinct look under this theme's own
+        # QSS (see theme.build_qss) -- right_panel.py's stage selector
+        # hits the same gap and fixes it the same way, an explicit
+        # per-button stylesheet rather than a generic checked rule, since
+        # nothing else in this window needs one.
+        for button_mode, btn in self._eyedropper_buttons.items():
+            btn.setStyleSheet(
+                f"background-color: {theme.WARN}; border-color: {theme.WARN}; "
+                f"color: {theme.BG_BASE};"
+                if button_mode == mode
+                else ""
+            )
+
+    def _on_point_clicked(self, point: tuple[float, float]) -> None:
+        if self._eyedropper_mode == "off":
+            return
+        self._sample_and_show(lambda frame: sample_region(frame, point))
+
+    def _sample_and_show(self, sampler) -> None:
+        if self._latest_frame is None:
+            return
+        sample = sampler(self._latest_frame)
+        if sample.pixel_count == 0:
+            return
+        if self._eyedropper_mode == "positive":
+            self._show_positive_sample(sample)
+        elif self._eyedropper_mode == "negative":
+            self._show_negative_sample(sample)
+
+    def _show_positive_sample(self, sample: ColorSample) -> None:
+        class_name = self._class_combo.currentData()
+        range_count = 2 if class_name == "hostile" else 1
+        hue_ranges, sat_min, val_min = derive_thresholds(sample)
+        hue_ranges = coerce_hue_range_count(hue_ranges, range_count)
+        self._pending_sample = (class_name, hue_ranges, sat_min, val_min)
+
+        wrap_tag = UI_LABEL_TR["EYEDROPPER_WRAP_TAG"] if sample.hue_wraps else ""
+        self._eyedropper_result_label.setText(
+            UI_LABEL_TR["EYEDROPPER_POSITIVE_SUMMARY"].format(
+                hue=sample.hue_median % 180.0,
+                sat=sample.sat_median,
+                val=sample.val_median,
+                pixels=sample.pixel_count,
+                wrap=wrap_tag,
+            )
+        )
+        self._eyedropper_apply_btn.setEnabled(True)
+        self._eyedropper_cancel_btn.setEnabled(True)
+
+    def _show_negative_sample(self, sample: ColorSample) -> None:
+        self._pending_sample = None
+        reports = check_negative_sample(sample, self._working_config)
+        lines = []
+        for report in reports:
+            class_title = (
+                UI_LABEL_TR["HOSTILE_CLASS_TITLE"]
+                if report.class_name == "hostile"
+                else UI_LABEL_TR["FRIENDLY_CLASS_TITLE"]
+            )
+            if report.accepted:
+                field_label = UI_LABEL_TR[_TIGHTEN_FIELD_LABEL_KEY[report.tighten_field]]
+                lines.append(
+                    UI_LABEL_TR["EYEDROPPER_NEGATIVE_HIT"].format(
+                        cls=class_title, field=field_label, value=report.suggested_value
+                    )
+                )
+            else:
+                lines.append(UI_LABEL_TR["EYEDROPPER_NEGATIVE_CLEAR"].format(cls=class_title))
+        self._eyedropper_result_label.setText("\n".join(lines))
+        self._eyedropper_apply_btn.setEnabled(False)
+        self._eyedropper_cancel_btn.setEnabled(True)
+
+    def _on_eyedropper_apply(self) -> None:
+        if self._pending_sample is None:
+            return
+        class_name, hue_ranges, sat_min, val_min = self._pending_sample
+        classes = tuple(
+            dataclasses.replace(c, hue_ranges=hue_ranges, sat_min=sat_min, val_min=val_min)
+            if c.name == class_name
+            else c
+            for c in self._working_config.classes
+        )
+        self._apply_config(dataclasses.replace(self._working_config, classes=classes))
+        self._sync_widgets_from_config()
+        self._clear_pending_sample()
+
+    def _on_eyedropper_cancel(self) -> None:
+        self._clear_pending_sample()
+
+    def _clear_pending_sample(self) -> None:
+        self._pending_sample = None
+        self._eyedropper_result_label.setText("")
+        self._eyedropper_apply_btn.setEnabled(False)
+        self._eyedropper_cancel_btn.setEnabled(False)
 
     # --- presets ---
 
@@ -456,10 +664,12 @@ class TuningWindow(QDialog):
         loaded = load_hsv_preset(self._presets_dir / f"{name}.json")
         self._apply_config(loaded)
         self._sync_widgets_from_config()
+        self._clear_pending_sample()
 
     def _on_reset_defaults(self) -> None:
         self._apply_config(ColorDetectorConfig())
         self._sync_widgets_from_config()
+        self._clear_pending_sample()
 
     def _sync_widgets_from_config(self) -> None:
         """Pushes ``self._working_config`` into every slider/checkbox --
