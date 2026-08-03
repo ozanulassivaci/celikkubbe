@@ -144,6 +144,7 @@ class PipelineWorker(QThread):
         clock: Clock,
         stage: Stage = Stage.STAGE_2,
         dev_mode: bool = False,
+        diag: bool = False,
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -151,6 +152,12 @@ class PipelineWorker(QThread):
         self._link = link
         self._clock = clock
         self._dev_mode = dev_mode
+        # Per-contour, per-filter-stage diagnostic logging in
+        # vision.l2_color.ColorDetector.detect -- see its own _log_diag
+        # docstring. Off by default: it draws a filled mask and calls
+        # cv2.mean per contour, real per-frame cost not worth paying
+        # unless someone is actively diagnosing a detection problem.
+        self._diag = diag
         if dev_mode:
             logger.warning(
                 "DEV MODE ENABLED -- self-test is skipped at startup, homing is "
@@ -412,7 +419,7 @@ class PipelineWorker(QThread):
         self._camera_health.record_frame(frame.t)
 
         detect_start = self._clock.now()
-        detections, _ = self._detector.detect(frame)
+        detections, _ = self._detector.detect(frame, diag=self._diag)
         detect_ms = (self._clock.now() - detect_start) * 1000.0
         self._inference_health.record(detect_ms)
         self._detection_health.record(max((d.confidence for d in detections), default=None))

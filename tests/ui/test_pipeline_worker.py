@@ -727,7 +727,7 @@ def test_class_override_dies_with_the_track_id(qtbot):
     # track out past TRACK_LOST_MS, then genuinely drops it (see its own
     # update()'s docstring: a track already emitted once as LOST is
     # pruned on the *next* call).
-    worker._detector.detect = lambda frame, debug=False: ([], None)
+    worker._detector.detect = lambda frame, debug=False, diag=False: ([], None)
     lost_ticks = int(core_config.TRACK_LOST_MS / 1000.0 / _TICK_DT) + 5
     for _ in range(lost_ticks):
         clock.advance(_TICK_DT)

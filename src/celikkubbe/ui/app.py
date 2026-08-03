@@ -95,6 +95,16 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         "e-stop/driver-alarm for mode transitions -- field testing only, "
         "never at the competition. Shows a permanent warning banner.",
     )
+    parser.add_argument(
+        "--diag",
+        action="store_true",
+        help="log every contour the L2 colour detector produces each frame, "
+        "per filter stage (area/solidity/aspect_ratio/circularity/class_cap), "
+        "with the measured value against the threshold and mean HSV -- see "
+        "vision.l2_color.ColorDetector._log_diag. Also enables INFO-level "
+        "logging to stderr, since it is otherwise configured nowhere and "
+        "these rows would be silently dropped.",
+    )
     args = parser.parse_args(argv)
     if args.source == "video" and not args.path:
         parser.error("--source video requires --path")
@@ -111,6 +121,13 @@ def build(argv: list[str] | None = None) -> tuple[QApplication, MainWindow, Pipe
             "homing is treated as satisfied, and e-stop/driver-alarm no "
             "longer trip M4_SAFE. Never run this at the competition."
         )
+    if args.diag:
+        # INFO-level logging is otherwise configured nowhere in this
+        # codebase (every logger.info call is a real, silent no-op without
+        # this) -- --diag needs it visible, so it configures it itself
+        # rather than requiring a separate flag just to see its own output.
+        logging.basicConfig(level=logging.INFO)
+        logger.info("DIAG MODE ENABLED (--diag) -- logging per-contour filter-stage detail")
 
     app = QApplication.instance()
     if app is None:
@@ -121,7 +138,7 @@ def build(argv: list[str] | None = None) -> tuple[QApplication, MainWindow, Pipe
     clock = SystemClock()
     source, source_label = _build_source(args, clock)
     link = _build_link(args, clock)
-    worker = PipelineWorker(source, link, clock, stage=stage, dev_mode=args.dev)
+    worker = PipelineWorker(source, link, clock, stage=stage, dev_mode=args.dev, diag=args.diag)
     gamepad = GamepadWorker()
     window = MainWindow(worker, source_label=source_label, font_family=font_family, gamepad=gamepad)
 

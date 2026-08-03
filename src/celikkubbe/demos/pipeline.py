@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import logging
 import math
 import time
 
@@ -270,6 +271,14 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         help="fault to inject at a simulated wall-clock time, e.g. estop@5s or "
         "crc_errors:0.2@2s -- requires --link sim; may be given more than once",
     )
+    parser.add_argument(
+        "--diag",
+        action="store_true",
+        help="log every contour the L2 colour detector produces each frame, "
+        "per filter stage, with the measured value against the threshold and "
+        "mean HSV -- see vision.l2_color.ColorDetector._log_diag. Also enables "
+        "INFO-level logging to stderr.",
+    )
     args = parser.parse_args(argv)
     if args.source == "video" and not args.path:
         parser.error("--source video requires --path")
@@ -285,6 +294,11 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
 def run(argv: list[str] | None = None) -> None:
     args = _parse_args(argv)
     stage = {"1": Stage.STAGE_1, "2": Stage.STAGE_2, "3": Stage.STAGE_3}[args.stage]
+
+    if args.diag:
+        # INFO-level logging is configured nowhere else in this codebase --
+        # every logger.info call is a silent no-op without this.
+        logging.basicConfig(level=logging.INFO)
 
     clock = SystemClock()
     run_start_t = clock.now()
@@ -350,7 +364,7 @@ def run(argv: list[str] | None = None) -> None:
                 continue
 
             detect_start = time.perf_counter()
-            detections, _ = detector.detect(frame)
+            detections, _ = detector.detect(frame, diag=args.diag)
             detect_ms = (time.perf_counter() - detect_start) * 1000.0
 
             track_start = time.perf_counter()

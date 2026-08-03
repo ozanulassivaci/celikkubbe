@@ -159,6 +159,7 @@ class _ContourMetrics:
     solidity: float
     rect_w: float
     rect_h: float
+    aspect_ratio: float
     reject_reason: str | None
 
 
@@ -274,7 +275,7 @@ class ColorDetector:
         )
 
     def detect(
-        self, frame: Frame, debug: bool = False
+        self, frame: Frame, debug: bool = False, diag: bool = False
     ) -> tuple[list[Detection], DebugMasks | None]:
         cfg = self.config
         width, height = frame.intrinsics.width, frame.intrinsics.height
@@ -331,6 +332,9 @@ class ColorDetector:
             )
             cap = cfg.max_detections_per_class
             kept, capped = survivors[:cap], survivors[cap:]
+
+            if diag:
+                self._log_diag(color_class.name, measured, kept, capped, min_area_px, hsv, cfg)
 
             for m in kept:
                 detections.append(
@@ -433,8 +437,88 @@ class ColorDetector:
             reject_reason = "circularity"
 
         return _ContourMetrics(
-            contour, bbox_px, area, circularity, solidity, rect_w, rect_h, reject_reason
+            contour,
+            bbox_px,
+            area,
+            circularity,
+            solidity,
+            rect_w,
+            rect_h,
+            aspect_ratio,
+            reject_reason,
         )
+
+    def _log_diag(
+        self,
+        class_name: str,
+        measured: list[_ContourMetrics],
+        kept: list[_ContourMetrics],
+        capped: list[_ContourMetrics],
+        min_area_px: int,
+        hsv: np.ndarray,
+        cfg: ColorDetectorConfig,
+    ) -> None:
+        """One row per contour this class's mask produced this frame,
+        evaluating every stage independently of the elif chain's own
+        short-circuiting -- ``reject_reason`` only ever names the first
+        filter that failed, but a --diag row needs every stage's own
+        pass/fail so "does the model's contour appear at all, and if so
+        which single stage kills it" is answered directly from the log
+        rather than inferred. mean_hue/mean_sat/mean_val are restricted to
+        the contour's own filled mask (cv2.mean with a per-contour mask),
+        not the bounding box, so a concave silhouette's background pixels
+        never leak into the colour reading.
+        """
+        kept_ids = {id(m) for m in kept}
+        capped_ids = {id(m) for m in capped}
+        aspect_lo, aspect_hi = cfg.aspect_ratio_range
+        for i, m in enumerate(measured):
+            contour_mask = np.zeros(hsv.shape[:2], dtype=np.uint8)
+            cv2.drawContours(contour_mask, [m.contour], -1, 255, -1)
+            mean_h, mean_s, mean_v = cv2.mean(hsv, mask=contour_mask)[:3]
+
+            area_pass = m.area >= min_area_px
+            solidity_pass = m.solidity >= cfg.solidity_min
+            aspect_pass = aspect_lo <= m.aspect_ratio <= aspect_hi
+            circularity_pass = (not cfg.require_circularity) or m.circularity >= cfg.circularity_min
+
+            if id(m) in kept_ids:
+                cap_status = "PASS"
+                verdict = "ACCEPT"
+            elif id(m) in capped_ids:
+                cap_status = "FAIL"
+                verdict = "REJECT:class_cap"
+            else:
+                cap_status = "N/A"
+                verdict = f"REJECT:{m.reject_reason}"
+
+            logger.info(
+                "DIAG %s#%d bbox=%s area=%.1f(min=%d %s) solidity=%.3f(min=%.2f %s) "
+                "aspect_ratio=%.2f(range=%.1f-%.1f %s) circularity=%.3f(min=%.2f req=%s %s) "
+                "class_cap=%s hue=%.1f sat=%.1f val=%.1f verdict=%s",
+                class_name,
+                i,
+                m.bbox_px,
+                m.area,
+                min_area_px,
+                "PASS" if area_pass else "FAIL",
+                m.solidity,
+                cfg.solidity_min,
+                "PASS" if solidity_pass else "FAIL",
+                m.aspect_ratio,
+                aspect_lo,
+                aspect_hi,
+                "PASS" if aspect_pass else "FAIL",
+                m.circularity,
+                cfg.circularity_min,
+                cfg.require_circularity,
+                "PASS" if circularity_pass else "FAIL",
+                cap_status,
+                mean_h,
+                mean_s,
+                mean_v,
+                verdict,
+            )
 
     def _build_detection(
         self,

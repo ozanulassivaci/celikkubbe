@@ -480,6 +480,83 @@ def test_debug_masks_populated_only_when_requested() -> None:
     assert len(debug_on.contours) >= 1
 
 
+# --- --diag: per-contour, per-filter-stage logging ---
+
+
+def _draw_hex_wings(image: np.ndarray, hex_color: str) -> np.ndarray:
+    """A swept-wing silhouette (fuselage + wings + tailfins) filled in
+    ``hex_color`` -- large bounding box, plenty of area, but its own
+    convex hull is much bigger than its filled area because of the deep
+    concave notches between fuselage and wingtips, exactly the shape
+    class_min_area_px cannot see coming. Empirically measured at
+    solidity ~0.37, well under the 0.75 default -- this is the shape
+    that reproduces "a large model produces zero detections" without
+    needing a real photographed target.
+    """
+    out = image.copy()
+    color = hex_to_bgr(hex_color)
+    cv2.rectangle(out, (140, 20), (160, 230), color, -1)
+    cv2.fillPoly(out, [np.array([[140, 120], [40, 180], [60, 190], [140, 150]])], color)
+    cv2.fillPoly(out, [np.array([[160, 120], [260, 180], [240, 190], [160, 150]])], color)
+    cv2.fillPoly(out, [np.array([[145, 190], [110, 230], [150, 230]])], color)
+    cv2.fillPoly(out, [np.array([[155, 190], [190, 230], [150, 230]])], color)
+    return out
+
+
+def test_diag_off_by_default_logs_nothing(caplog) -> None:
+    base = _blank_frame()
+    image = _draw_hex_circle(base.image, (100, 100), 20, HOSTILE_HEX)
+    frame = _frame_with_image(image, base)
+
+    with caplog.at_level(logging.INFO, logger="celikkubbe.vision.l2_color"):
+        ColorDetector().detect(frame)
+
+    assert "DIAG" not in caplog.text
+
+
+def test_diag_logs_a_row_for_an_accepted_contour(caplog) -> None:
+    base = _blank_frame()
+    image = _draw_hex_circle(base.image, (100, 100), 20, HOSTILE_HEX)
+    frame = _frame_with_image(image, base)
+
+    with caplog.at_level(logging.INFO, logger="celikkubbe.vision.l2_color"):
+        detections, _ = ColorDetector().detect(frame, diag=True)
+
+    assert len(detections) == 1
+    diag_lines = [line for line in caplog.text.splitlines() if "DIAG hostile#0" in line]
+    assert len(diag_lines) == 1
+    assert "verdict=ACCEPT" in diag_lines[0]
+    assert "area=" in diag_lines[0] and "solidity=" in diag_lines[0]
+    assert "hue=" in diag_lines[0] and "sat=" in diag_lines[0] and "val=" in diag_lines[0]
+
+
+def test_diag_reports_area_pass_but_solidity_fail_for_a_wing_shape(caplog) -> None:
+    # The reproduction of this session's actual bug report: a large,
+    # well-saturated, correctly-coloured aircraft silhouette that the
+    # area filter clears easily but the default solidity_min=0.75
+    # rejects outright -- proving the model's contour DOES appear in the
+    # raw contour list (ruling out an HSV/mask problem) and identifying
+    # exactly which single stage discards it (not an inverted comparator
+    # anywhere -- solidity_min is simply too strict for this silhouette).
+    base = _blank_frame(width=300, height=250)
+    image = _draw_hex_wings(base.image, HOSTILE_HEX)
+    frame = _frame_with_image(image, base)
+
+    with caplog.at_level(logging.INFO, logger="celikkubbe.vision.l2_color"):
+        detections, _ = ColorDetector().detect(frame, diag=True)
+
+    assert detections == []  # confirms the reported symptom: zero detections
+    diag_lines = [line for line in caplog.text.splitlines() if "DIAG hostile#0" in line]
+    assert len(diag_lines) == 1
+    line = diag_lines[0]
+    assert "area=" in line
+    area_clause = line.split("area=")[1].split(")")[0]
+    assert "PASS" in area_clause, f"expected the area stage to pass, got: {area_clause}"
+    solidity_clause = line.split("solidity=")[1].split(")")[0]
+    assert "FAIL" in solidity_clause, f"expected the solidity stage to fail, got: {solidity_clause}"
+    assert "verdict=REJECT:solidity" in line
+
+
 # --- HSV preset persistence ---
 
 
