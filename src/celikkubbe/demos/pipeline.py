@@ -330,6 +330,7 @@ def run(argv: list[str] | None = None) -> None:
         commanded_tilt_deg=None,
         telemetry=None,
         last_self_test=None,
+        class_overrides={},
     )
 
     previous_order: list[int] = []

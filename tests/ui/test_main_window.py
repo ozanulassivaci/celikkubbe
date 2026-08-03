@@ -14,7 +14,7 @@ from PyQt6.QtWidgets import QApplication, QLabel
 
 from celikkubbe.core import config, strings
 from celikkubbe.core.clock import FakeClock
-from celikkubbe.core.types import Axis, Layer, Mode, ReasonCode, Stage
+from celikkubbe.core.types import Axis, Layer, Mode, ReasonCode, Stage, TargetClass
 from celikkubbe.io.sim_link import SimTurretLink
 from celikkubbe.ui import theme
 from celikkubbe.ui.main_window import MainWindow
@@ -229,6 +229,74 @@ def test_left_panel_track_selection_sets_manual_target_id(qtbot):
     window._left_panel.track_selected.emit(track_id)
 
     assert window._input_builder.build().manual_target_id == track_id
+
+
+def test_left_panel_class_signals_reach_the_worker(qtbot):
+    clock = FakeClock()
+    window, worker, _link = _make_window(clock)
+    qtbot.addWidget(window)
+    _settle_self_test(worker, clock)
+    _tick(worker, clock)
+    track_id = window._latest_snapshot.tracks[0].track_id
+
+    window._left_panel.class_assigned.emit(track_id, TargetClass.F16)
+    _tick(worker, clock)
+    assert worker._state.class_overrides.get(track_id) is TargetClass.F16
+
+    window._left_panel.class_cleared.emit(track_id)
+    _tick(worker, clock)
+    assert track_id not in worker._state.class_overrides
+
+
+def test_manual_class_keyboard_shortcut_assigns_class_to_selected_track(qtbot):
+    clock = FakeClock()
+    window, worker, _link = _make_window(clock)
+    qtbot.addWidget(window)
+    _settle_self_test(worker, clock)
+    _tick(worker, clock)
+    track_id = window._latest_snapshot.tracks[0].track_id
+
+    worker._state = dataclasses.replace(worker._state, selected_track_id=track_id)
+    _tick(worker, clock)
+    assert window._latest_snapshot.state.selected_track_id == track_id
+
+    qtbot.keyPress(window, Qt.Key.Key_F)
+    _tick(worker, clock)
+
+    assert worker._state.class_overrides.get(track_id) is TargetClass.F16
+
+
+def test_manual_class_keyboard_shortcut_is_a_noop_with_nothing_selected(qtbot):
+    clock = FakeClock()
+    window, worker, _link = _make_window(clock)
+    qtbot.addWidget(window)
+    _settle_self_test(worker, clock)
+    _tick(worker, clock)
+    assert window._latest_snapshot.state.selected_track_id is None
+
+    qtbot.keyPress(window, Qt.Key.Key_M)
+    _tick(worker, clock)
+
+    assert worker._state.class_overrides == {}
+
+
+def test_h_key_still_toggles_tuning_window_not_a_manual_class(qtbot):
+    """H is not in _MANUAL_CLASS_KEYS -- it stays bound to the tuning
+    window (see that dict's own docstring on the collision).
+    """
+    clock = FakeClock()
+    window, worker, _link = _make_window(clock)
+    qtbot.addWidget(window)
+    _settle_self_test(worker, clock)
+    _tick(worker, clock)
+    track_id = window._latest_snapshot.tracks[0].track_id
+    worker._state = dataclasses.replace(worker._state, selected_track_id=track_id)
+    _tick(worker, clock)
+
+    assert window._tuning_window is None
+    qtbot.keyPress(window, Qt.Key.Key_H)
+    assert window._tuning_window is not None
+    assert worker._state.class_overrides == {}
 
 
 def test_right_panel_estop_signal_reaches_the_link(qtbot):

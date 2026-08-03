@@ -25,7 +25,17 @@ from PyQt6.QtWidgets import (
 from celikkubbe import __version__
 from celikkubbe.core import config
 from celikkubbe.core.strings import UI_LABEL_TR
-from celikkubbe.core.types import IFF, Axis, EngagementState, Layer, Mode, Stage, Track, TrackStatus
+from celikkubbe.core.types import (
+    IFF,
+    Axis,
+    EngagementState,
+    Layer,
+    Mode,
+    Stage,
+    TargetClass,
+    Track,
+    TrackStatus,
+)
 from celikkubbe.ui import theme
 from celikkubbe.ui.gamepad import GamepadWorker
 from celikkubbe.ui.left_panel import LeftPanel
@@ -56,6 +66,17 @@ _STAGE_KEYS: dict[int, Stage] = {
     Qt.Key.Key_1: Stage.STAGE_1,
     Qt.Key.Key_2: Stage.STAGE_2,
     Qt.Key.Key_3: Stage.STAGE_3,
+}
+# Manual class assignment on the currently selected track, for a
+# demonstration where opening a context menu per shot is too slow. H
+# would be the natural mnemonic for HELİKOPTER, but it is already bound
+# to the tuning window (see keyPressEvent) -- K stands in instead rather
+# than reassigning an established, tested shortcut.
+_MANUAL_CLASS_KEYS: dict[int, TargetClass] = {
+    Qt.Key.Key_F: TargetClass.F16,
+    Qt.Key.Key_M: TargetClass.MISSILE,
+    Qt.Key.Key_D: TargetClass.UAV,
+    Qt.Key.Key_K: TargetClass.HELICOPTER,
 }
 
 _MODE_COLOR: dict[Mode, str] = {
@@ -347,6 +368,8 @@ class MainWindow(QMainWindow):
 
         self._canvas.clicked_normalized.connect(self._on_canvas_clicked)
         self._left_panel.track_selected.connect(self._select_track)
+        self._left_panel.class_assigned.connect(self._worker.set_track_class)
+        self._left_panel.class_cleared.connect(self._worker.clear_track_class)
         self._wire_right_panel()
         if self._gamepad is not None:
             self._wire_gamepad(self._gamepad)
@@ -430,6 +453,8 @@ class MainWindow(QMainWindow):
             self._toggle_tuning_window()
         elif key == Qt.Key.Key_F1:
             self._toggle_help_overlay()
+        elif key in _MANUAL_CLASS_KEYS:
+            self._assign_class_to_selected_track(_MANUAL_CLASS_KEYS[key])
         else:
             super().keyPressEvent(event)
             return
@@ -535,6 +560,19 @@ class MainWindow(QMainWindow):
     def _select_track(self, track_id: int) -> None:
         self._input_builder.set_manual_target(track_id)
         self._worker.set_operator_input(self._input_builder.build())
+
+    def _assign_class_to_selected_track(self, cls: TargetClass) -> None:
+        """F/M/D/K on the currently selected (locked) track -- see
+        _MANUAL_CLASS_KEYS's own docstring on the H/HELİKOPTER collision.
+        A no-op with nothing selected, same as every other selected-
+        track-only action in this class.
+        """
+        if self._latest_snapshot is None:
+            return
+        track_id = self._latest_snapshot.state.selected_track_id
+        if track_id is None:
+            return
+        self._worker.set_track_class(track_id, cls)
 
     def _on_stage_selected(self, stage: Stage) -> None:
         self._worker.set_stage(stage)

@@ -88,6 +88,7 @@ class _Rig:
             commanded_tilt_deg=None,
             telemetry=None,
             last_self_test=None,
+            class_overrides={},
         )
         self._last_ammo_fired = 0
         self.last_telemetry = None

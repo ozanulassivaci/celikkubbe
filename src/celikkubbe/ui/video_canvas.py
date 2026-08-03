@@ -49,6 +49,7 @@ from celikkubbe.geometry.solver import AimSolution
 from celikkubbe.ui import theme
 from celikkubbe.ui.snapshot import UiSnapshot
 from celikkubbe.ui.theme import AngleGauge
+from celikkubbe.vision.l2_color import is_range_estimate_unreliable
 
 _HEADER_HEIGHT_PX = 22
 _TELEMETRY_HEIGHT_PX = 46
@@ -215,12 +216,22 @@ def lock_banner_rect(frame: QRectF, strip_top: float) -> QRectF:
     return QRectF(frame.left(), top, frame.width(), _LOCK_BANNER_HEIGHT_PX)
 
 
-def class_label(cls: TargetClass | None) -> str:
+def class_label(cls: TargetClass | None, cls_source: str | None = None) -> str:
     """A track's class, in Turkish -- or BİLİNMEYEN when there is none.
-    Shared by the box label and the lock banner so both stay in sync,
-    and so this is the one place to change if TARGET_CLASS_TR grows.
+    Shared by the box label, the lock banner, the target list and the
+    locked-target readout so all four stay in sync, and so this is the
+    one place to change if TARGET_CLASS_TR grows.
+
+    ``cls_source`` is optional (defaults to None, the pre-existing
+    behaviour) but every call site that has a full ``Track`` should pass
+    ``track.cls_source``: an operator-assigned class must never be
+    visually indistinguishable from a model-produced one, and this
+    suffix is the one place that distinction is actually drawn.
     """
-    return TARGET_CLASS_TR[cls] if cls is not None else UI_LABEL_TR["UNKNOWN_CLASS"]
+    label = TARGET_CLASS_TR[cls] if cls is not None else UI_LABEL_TR["UNKNOWN_CLASS"]
+    if cls_source == "operator":
+        return f"{label} {UI_LABEL_TR['CLASS_SOURCE_OPERATOR_TAG']}"
+    return label
 
 
 _IFF_COLOR: dict[IFF, str] = {
@@ -383,19 +394,23 @@ class VideoCanvas(QWidget):
         rect = QRectF(x1, y1, x2 - x1, y2 - y1)
         painter.drawRect(rect)
 
-        self._draw_label_near(painter, rect, self._format_label(track), pen.color())
+        self._draw_label_near(
+            painter, rect, self._format_label(track, snapshot.frame.intrinsics), pen.color()
+        )
 
         bbox_w_px = (track.bbox[2] - track.bbox[0]) * self._transform.displayed_w
         if 0.0 < bbox_w_px < config.MIN_TARGET_PX:
             self._draw_under_resolution_marker(painter, rect)
 
     @staticmethod
-    def _format_label(track: Track) -> str:
-        cls_label = class_label(track.cls)
+    def _format_label(track: Track, intrinsics: CameraIntrinsics) -> str:
+        cls_label = class_label(track.cls, track.cls_source)
         range_str = "--"
         if track.range_m is not None:
             prefix = "~" if track.range_source == "size" else ""
             range_str = f"{prefix}{track.range_m:.1f}m"
+            if is_range_estimate_unreliable(track, intrinsics):
+                range_str += "?"
         return f"{cls_label} {track.confidence:.0%} {range_str}"
 
     def _draw_label_near(self, painter: QPainter, rect: QRectF, text: str, color: QColor) -> None:
@@ -545,7 +560,7 @@ class VideoCanvas(QWidget):
         track = next((t for t in snapshot.tracks if t.track_id == selected_id), None)
         if track is None:
             return
-        cls_label = class_label(track.cls)
+        cls_label = class_label(track.cls, track.cls_source)
         text = f"{UI_LABEL_TR['TARGET_LOCKED']} — {cls_label}"
 
         painter.setFont(self._strip_font)

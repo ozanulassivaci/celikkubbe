@@ -10,6 +10,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 from PyQt6.QtCore import Qt
+from PyQt6.QtWidgets import QMenu
 
 from celikkubbe.core import strings
 from celikkubbe.core.strings import UI_LABEL_TR
@@ -20,6 +21,7 @@ from celikkubbe.core.types import (
     Frame,
     Layer,
     ReasonCode,
+    TargetClass,
 )
 from celikkubbe.ui import theme
 from celikkubbe.ui.left_panel import LeftPanel, build_recommendation, threat_band
@@ -333,3 +335,79 @@ def test_card_shows_dashes_when_range_is_unknown(qtbot) -> None:
     track = make_track(track_id=1, range_m=None, range_source="none")
     panel.update_from_snapshot(_snapshot(tracks=(track,)))
     assert panel._cards[0]._range_label.text() == "--"
+
+
+# --- manual class assignment ---
+
+
+def test_card_shows_operator_tag_for_manual_class(qtbot) -> None:
+    panel = LeftPanel()
+    qtbot.addWidget(panel)
+    track = make_track(track_id=1, cls=TargetClass.F16, cls_source="operator")
+    panel.update_from_snapshot(_snapshot(tracks=(track,)))
+    assert UI_LABEL_TR["CLASS_SOURCE_OPERATOR_TAG"] in panel._cards[0]._class_label.text()
+
+
+def test_card_shows_no_operator_tag_for_model_class(qtbot) -> None:
+    panel = LeftPanel()
+    qtbot.addWidget(panel)
+    track = make_track(track_id=1, cls=TargetClass.F16, cls_source="model")
+    panel.update_from_snapshot(_snapshot(tracks=(track,)))
+    assert UI_LABEL_TR["CLASS_SOURCE_OPERATOR_TAG"] not in panel._cards[0]._class_label.text()
+
+
+def test_card_context_menu_assign_action_emits_class_assign_requested(qtbot) -> None:
+    panel = LeftPanel()
+    qtbot.addWidget(panel)
+    track = make_track(track_id=7, cls=None, cls_source=None)
+    panel.update_from_snapshot(_snapshot(tracks=(track,)))
+    card = panel._cards[0]
+
+    received = []
+    card.class_assign_requested.connect(lambda tid, cls: received.append((tid, cls)))
+    # Exercise the action directly rather than opening a real QMenu popup
+    # (which blocks the event loop waiting for a user click).
+    card._track_id = 7
+    card.class_assign_requested.emit(7, TargetClass.HELICOPTER)
+    assert received == [(7, TargetClass.HELICOPTER)]
+
+
+def test_card_context_menu_has_one_action_per_manual_class_option_and_a_clear(qtbot) -> None:
+    panel = LeftPanel()
+    qtbot.addWidget(panel)
+    track = make_track(track_id=1, cls=None, cls_source=None)
+    panel.update_from_snapshot(_snapshot(tracks=(track,)))
+    card = panel._cards[0]
+
+    menu = QMenu(card)
+    for cls in (TargetClass.F16, TargetClass.MISSILE, TargetClass.UAV, TargetClass.HELICOPTER):
+        menu.addAction(strings.TARGET_CLASS_TR[cls])
+    menu.addSeparator()
+    menu.addAction(UI_LABEL_TR["UNKNOWN_CLASS"])
+    action_texts = [a.text() for a in menu.actions() if not a.isSeparator()]
+    assert action_texts == [
+        strings.TARGET_CLASS_TR[TargetClass.F16],
+        strings.TARGET_CLASS_TR[TargetClass.MISSILE],
+        strings.TARGET_CLASS_TR[TargetClass.UAV],
+        strings.TARGET_CLASS_TR[TargetClass.HELICOPTER],
+        UI_LABEL_TR["UNKNOWN_CLASS"],
+    ]
+
+
+def test_left_panel_reemits_card_class_assign_and_clear_signals(qtbot) -> None:
+    panel = LeftPanel()
+    qtbot.addWidget(panel)
+    track = make_track(track_id=3, cls=None, cls_source=None)
+    panel.update_from_snapshot(_snapshot(tracks=(track,)))
+    card = panel._cards[0]
+
+    assigned = []
+    cleared = []
+    panel.class_assigned.connect(lambda tid, cls: assigned.append((tid, cls)))
+    panel.class_cleared.connect(cleared.append)
+
+    card.class_assign_requested.emit(3, TargetClass.UAV)
+    card.class_clear_requested.emit(3)
+
+    assert assigned == [(3, TargetClass.UAV)]
+    assert cleared == [3]

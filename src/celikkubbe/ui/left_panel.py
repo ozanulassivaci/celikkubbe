@@ -1,9 +1,12 @@
 """LeftPanel: AI decision support and target tracking.
 
 Fixed-width column to the left of the video canvas. Everything here is
-read-only display except the target cards, which select a track by
-emitting ``track_selected`` -- MainWindow turns that into
-``OperatorInput.manual_target_id``, the same as a canvas click.
+read-only display except the target cards: a left click selects a track
+by emitting ``track_selected`` -- MainWindow turns that into
+``OperatorInput.manual_target_id``, the same as a canvas click -- and a
+right click opens a context menu to manually assign or clear that
+track's class (``class_assigned``/``class_cleared``), unblocking Stage 3
+range-rule testing without a real classifier.
 
 Three things matter more than they look, per the prompt this was built
 from:
@@ -24,23 +27,44 @@ from:
 from __future__ import annotations
 
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QMouseEvent
+from PyQt6.QtGui import QContextMenuEvent, QMouseEvent
 from PyQt6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QMenu,
     QScrollArea,
     QVBoxLayout,
     QWidget,
 )
 
 from celikkubbe.core import config, strings
-from celikkubbe.core.strings import IFF_LABEL_TR, TRACK_STATUS_TR, UI_LABEL_TR
-from celikkubbe.core.types import IFF, EngagementState, ReasonCode, Track, TrackStatus
+from celikkubbe.core.strings import IFF_LABEL_TR, TARGET_CLASS_TR, TRACK_STATUS_TR, UI_LABEL_TR
+from celikkubbe.core.types import (
+    IFF,
+    CameraIntrinsics,
+    EngagementState,
+    ReasonCode,
+    TargetClass,
+    Track,
+    TrackStatus,
+)
 from celikkubbe.ui import theme
 from celikkubbe.ui.snapshot import UiSnapshot
 from celikkubbe.ui.theme import RiskBar, StatusBadge
 from celikkubbe.ui.video_canvas import class_label
+from celikkubbe.vision.l2_color import is_range_estimate_unreliable
+
+# The four classes an operator can actually assign -- BALLOON is a
+# leftover from a pre-confirmation draft (see core/config.py's own
+# RANGE_RULES comment) and not offered here; UNKNOWN is what clearing an
+# assignment already produces, not something to assign.
+_MANUAL_CLASS_OPTIONS: tuple[TargetClass, ...] = (
+    TargetClass.F16,
+    TargetClass.MISSILE,
+    TargetClass.UAV,
+    TargetClass.HELICOPTER,
+)
 
 _THREAT_HIGH = 66.0
 _THREAT_MED = 33.0
@@ -74,7 +98,7 @@ def build_recommendation(snapshot: UiSnapshot) -> str:
     if selected is None:
         return UI_LABEL_TR["RECOMMENDATION_SEARCHING"]
 
-    cls = class_label(selected.cls)
+    cls = class_label(selected.cls, selected.cls_source)
     if state.engagement in (EngagementState.S5_ENGAGE, EngagementState.S6_ASSESS):
         return UI_LABEL_TR["RECOMMENDATION_ENGAGED"].format(cls=cls)
     if state.engagement is EngagementState.S4_AIM:
@@ -93,6 +117,8 @@ class TrackCard(QFrame):
     """
 
     clicked = pyqtSignal(int)
+    class_assign_requested = pyqtSignal(int, object)  # track_id, TargetClass
+    class_clear_requested = pyqtSignal(int)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -138,9 +164,10 @@ class TrackCard(QFrame):
         selected: bool,
         deferred: tuple[float, ReasonCode] | None,
         now: float,
+        intrinsics: CameraIntrinsics,
     ) -> None:
         self._track_id = track.track_id
-        self._class_label.setText(class_label(track.cls))
+        self._class_label.setText(class_label(track.cls, track.cls_source))
         self._class_label.setStyleSheet(
             f"font-weight: 600; color: {theme.TEXT_PRIMARY if not selected else theme.OK};"
         )
@@ -153,7 +180,11 @@ class TrackCard(QFrame):
         range_str = "--" if track.range_m is None else f"{track.range_m:.1f}m"
         if track.range_m is not None and track.range_source == "size":
             range_str = f"~{range_str}"
+        unreliable = track.range_m is not None and is_range_estimate_unreliable(track, intrinsics)
+        if unreliable:
+            range_str += "?"
         self._range_label.setText(range_str)
+        self._range_label.setStyleSheet(f"color: {theme.WARN if unreliable else theme.TEXT_DIM};")
         self._confidence_label.setText(f"{track.confidence:.0%}")
         band_label, band_color = threat_band(track.risk_score)
         self._threat_label.setText(band_label)
@@ -193,9 +224,26 @@ class TrackCard(QFrame):
             self.clicked.emit(self._track_id)
         super().mousePressEvent(event)
 
+    def contextMenuEvent(self, event: QContextMenuEvent) -> None:  # noqa: N802 - Qt override
+        if self._track_id is None:
+            return
+        track_id = self._track_id
+        menu = QMenu(self)
+        for cls in _MANUAL_CLASS_OPTIONS:
+            action = menu.addAction(TARGET_CLASS_TR[cls])
+            action.triggered.connect(
+                lambda _checked=False, c=cls: self.class_assign_requested.emit(track_id, c)
+            )
+        menu.addSeparator()
+        clear_action = menu.addAction(UI_LABEL_TR["UNKNOWN_CLASS"])
+        clear_action.triggered.connect(lambda: self.class_clear_requested.emit(track_id))
+        menu.exec(event.globalPos())
+
 
 class LeftPanel(QWidget):
     track_selected = pyqtSignal(int)
+    class_assigned = pyqtSignal(int, object)  # track_id, TargetClass
+    class_cleared = pyqtSignal(int)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -337,7 +385,7 @@ class LeftPanel(QWidget):
         label, color = threat_band(top.risk_score)
         self._threat_label.setText(label)
         self._threat_label.setStyleSheet(f"color: {color}; font-weight: 700; font-size: 12pt;")
-        self._threat_sub_label.setText(class_label(top.cls))
+        self._threat_sub_label.setText(class_label(top.cls, top.cls_source))
         self._risk_value_label.setText(f"{top.risk_score:.0f}")
         self._risk_bar.set_value(top.risk_score)
 
@@ -361,6 +409,8 @@ class LeftPanel(QWidget):
         while len(self._cards) < len(ordered):
             card = TrackCard()
             card.clicked.connect(self.track_selected.emit)
+            card.class_assign_requested.connect(self.class_assigned.emit)
+            card.class_clear_requested.connect(self.class_cleared.emit)
             self._list_layout.insertWidget(self._list_layout.count() - 1, card)
             self._cards.append(card)
         while len(self._cards) > len(ordered):
@@ -375,4 +425,5 @@ class LeftPanel(QWidget):
                 selected=track_id == snapshot.state.selected_track_id,
                 deferred=snapshot.state.deferred.get(track_id),
                 now=snapshot.t,
+                intrinsics=snapshot.frame.intrinsics,
             )

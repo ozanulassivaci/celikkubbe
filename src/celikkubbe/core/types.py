@@ -17,6 +17,12 @@ BoundingBox = tuple[float, float, float, float]
 
 RangeSource = Literal["depth", "size", "none"]
 
+# Where Track.cls actually came from -- None means neither a model nor an
+# operator has ever classified this track (still BİLİNMEYEN). See
+# Track.cls_source's own docstring for why this must never be inferred
+# from cls alone.
+ClsSource = Literal["model", "operator"]
+
 
 class Stage(Enum):
     STAGE_1 = "STAGE_1"
@@ -178,7 +184,10 @@ class Track:
     Frozen: the tracker (``tracking.py``) builds a fresh ``Track`` every
     frame rather than mutating one in place. Engagement bookkeeping that
     must survive across frames (shot attempts) does not belong here for
-    exactly that reason — see ``SystemState.attempts``.
+    exactly that reason — see ``SystemState.attempts``. The operator
+    class-override dict is the same story — see
+    ``SystemState.class_overrides`` — applied to a fresh ``cls``/
+    ``cls_source`` here every frame rather than mutating one in place.
     """
 
     track_id: int
@@ -193,6 +202,16 @@ class Track:
     risk_score: float
     frames_confirmed: int
     last_seen_t: float
+    # Provenance of ``cls`` -- "model" (L1/L2 voting), "operator" (a
+    # manual assignment that survives voting until cleared or the track
+    # dies), or None when neither has ever classified this track. Default
+    # None (not a required constructor arg) so every pre-existing
+    # ``Track(...)`` call site keeps working; every *new* call site that
+    # actually classifies a track should still pass it explicitly. An
+    # operator-assigned class must never be visually indistinguishable
+    # from a model-produced one: this is what every renderer keys off to
+    # tell the two apart, never a guess like "cls is not None".
+    cls_source: ClsSource | None = None
 
 
 @dataclass(frozen=True)
@@ -305,3 +324,14 @@ class SystemState:
     commanded_tilt_deg: float | None
     telemetry: Telemetry | None
     last_self_test: SelfTestResult | None
+    # track_id -> operator-assigned class, applied to a fresh Track every
+    # frame (see Track.cls_source's own docstring) rather than mutating
+    # one in place, and pruned to currently-live track ids every tick —
+    # an override dies with the track_id; a lost-and-reacquired target
+    # gets a fresh id and starts unlabelled again, which is correct,
+    # since identity was not preserved. Managed directly by
+    # PipelineWorker, the same way it already owns active_layer/
+    # layer_manual_override -- engagement.step() has no need to know
+    # about this, since the override is applied to Track.cls before
+    # tracks ever reach it.
+    class_overrides: dict[int, TargetClass]

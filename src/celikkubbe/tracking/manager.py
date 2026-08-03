@@ -78,9 +78,10 @@ class _TrackState:
         cx, cy = self.centroid_filter.position
         bbox = _bbox_from_centroid(cx, cy, self.last_bbox_size)
         range_m = self.range_filter.value if self.range_filter is not None else None
+        cls = _majority(self.cls_votes) if self.cls_votes else None
         return Track(
             track_id=self.track_id,
-            cls=_majority(self.cls_votes) if self.cls_votes else None,
+            cls=cls,
             confidence=self.confidence,
             range_m=range_m,
             range_source=self.last_range_source if range_m is not None else "none",
@@ -91,6 +92,11 @@ class _TrackState:
             risk_score=0.0,  # filled in by priority.py downstream
             frames_confirmed=self.frames_confirmed,
             last_seen_t=self.last_seen_t,
+            # An operator override, if any, is applied downstream by
+            # PipelineWorker (see its own _apply_class_overrides) -- this
+            # class has no notion of operator overrides at all, so every
+            # Track it builds directly reports "model" provenance.
+            cls_source="model" if cls is not None else None,
         )
 
     def _voted_iff(self) -> IFF:

@@ -46,7 +46,9 @@ from celikkubbe.core.types import (
     SelfTestResult,
     Stage,
     SystemState,
+    TargetClass,
     Telemetry,
+    Track,
 )
 from celikkubbe.geometry.ballistics import DEFAULT_BALLISTIC_TABLE
 from celikkubbe.geometry.calibration import DEFAULT_BORESIGHT_PATH, load_boresight
@@ -104,6 +106,31 @@ def _hit_result_from_ammo_delta(previous: int, current: int) -> HitResult | None
     not a silently invented result.
     """
     return HitResult.KILL if current > previous else None
+
+
+def _apply_class_overrides(tracks: list[Track], overrides: dict[int, TargetClass]) -> list[Track]:
+    """Applies operator class overrides to a fresh track list and marks
+    provenance -- a pure function so this is testable without a running
+    worker. Never mutates ``overrides`` or any ``Track`` in place: an
+    override replaces ``cls``/``cls_source`` on a *new* Track via
+    ``dataclasses.replace()``, the same reasoning ``Track`` is frozen at
+    all (see its own docstring).
+
+    ``cls_source`` reports "operator" whenever an override exists for
+    this track_id -- model voting is never consulted for an overridden
+    track, which is exactly what "an override survives class voting"
+    means -- "model" when a real class exists with no override, and None
+    when neither has ever classified this track. Never inferred from
+    ``cls is not None`` alone, since that would conflate the two sources.
+    """
+    result = []
+    for t in tracks:
+        override = overrides.get(t.track_id)
+        if override is not None:
+            result.append(dataclasses.replace(t, cls=override, cls_source="operator"))
+        else:
+            result.append(dataclasses.replace(t, cls_source="model" if t.cls is not None else None))
+    return result
 
 
 class PipelineWorker(QThread):
@@ -167,6 +194,12 @@ class PipelineWorker(QThread):
         self._control_lock = threading.Lock()
         self._requested_stage: Stage | None = None
         self._requested_layer: Layer | None = None
+        # track_id -> TargetClass to set, or None to clear -- same
+        # deferred-request reasoning as stage/layer above, and the same
+        # lock, since it is a small dict of pending intent rather than an
+        # incrementally-mutated shared structure (see theme.py's own
+        # lock-vs-whole-object-swap distinction in CLAUDE.md).
+        self._requested_class_overrides: dict[int, TargetClass | None] = {}
 
         self._state = SystemState(
             stage=stage,
@@ -189,6 +222,7 @@ class PipelineWorker(QThread):
             commanded_tilt_deg=None,
             telemetry=None,
             last_self_test=None,
+            class_overrides={},
         )
         self._previous_order: list[int] = []
         self._frames_seen = 0
@@ -239,6 +273,20 @@ class PipelineWorker(QThread):
     def select_layer(self, layer: Layer) -> None:
         with self._control_lock:
             self._requested_layer = layer
+
+    def set_track_class(self, track_id: int, cls: TargetClass) -> None:
+        """The operator manually classifying a track (LeftPanel's combo/
+        context menu, or a keyboard shortcut on the selected track) --
+        see SystemState.class_overrides's own docstring for why this
+        lives there rather than as mutable state on Track itself.
+        """
+        with self._control_lock:
+            self._requested_class_overrides[track_id] = cls
+
+    def clear_track_class(self, track_id: int) -> None:
+        """Returns a track to BİLİNMEYEN / cls_source=None."""
+        with self._control_lock:
+            self._requested_class_overrides[track_id] = None
 
     def retry_self_test(self) -> None:
         self._self_test_retry.set()
@@ -374,6 +422,14 @@ class PipelineWorker(QThread):
         tracks = self._tracker.update(detections, now=self._clock.now())
         track_ms = (self._clock.now() - track_start) * 1000.0
 
+        class_overrides = self._consume_requested_class_overrides()
+        tracks = _apply_class_overrides(tracks, class_overrides)
+        # An override dies with the track_id: prune to whatever the
+        # tracker actually still returns this tick, so a lost-and-
+        # reacquired target (a fresh track_id) starts unlabelled again.
+        live_ids = {t.track_id for t in tracks}
+        class_overrides = {tid: cls for tid, cls in class_overrides.items() if tid in live_ids}
+
         scored = [
             dataclasses.replace(
                 t, risk_score=priority.compute_risk_score(t.cls, t.range_m, t.confidence)
@@ -442,6 +498,7 @@ class PipelineWorker(QThread):
             mode=next_mode,
             tracks=tuple(scored),
             last_self_test=self._last_self_test_display,
+            class_overrides=class_overrides,
         )
         engagement_fallback_reason: ReasonCode | None = None
         if next_mode is Mode.M1_INIT:
@@ -584,6 +641,27 @@ class PipelineWorker(QThread):
             active_layer=new_layer,
             layer_manual_override=new_override,
         )
+
+    def _consume_requested_class_overrides(self) -> dict[int, TargetClass]:
+        """Merges set_track_class()/clear_track_class()'s pending
+        requests, if any, into the persistent override dict carried on
+        self._state -- same deferred-request reasoning as stage/layer
+        above. Returns the merged dict; the caller is responsible for
+        pruning it to live track_ids and writing it back via
+        dataclasses.replace(), since this method runs before the current
+        tick's tracks even exist yet.
+        """
+        with self._control_lock:
+            requested = dict(self._requested_class_overrides)
+            self._requested_class_overrides.clear()
+
+        overrides = dict(self._state.class_overrides)
+        for track_id, cls in requested.items():
+            if cls is None:
+                overrides.pop(track_id, None)
+            else:
+                overrides[track_id] = cls
+        return overrides
 
     def _solve_crosshair(
         self,

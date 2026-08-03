@@ -15,12 +15,16 @@ import dataclasses
 
 import pytest
 
+from celikkubbe.core import config as core_config
 from celikkubbe.core.clock import FakeClock
 from celikkubbe.core.commands import Arm
-from celikkubbe.core.types import Axis, Layer, Mode, Stage
+from celikkubbe.core.gates import RangeGate
+from celikkubbe.core.types import Axis, Layer, Mode, Stage, TargetClass
 from celikkubbe.io.sim_link import SimTurretLink
-from celikkubbe.ui.pipeline_worker import PipelineWorker
+from celikkubbe.ui.pipeline_worker import PipelineWorker, _apply_class_overrides
 from celikkubbe.vision.sources import SyntheticSource, SyntheticSourceConfig, SyntheticTarget
+
+from ..factories import make_track
 
 _TICK_DT = 1.0 / 30.0
 
@@ -574,3 +578,161 @@ def test_leaving_stage_1_clears_an_active_l3_override_back_to_l2(qtbot):
 
     assert worker._state.stage is Stage.STAGE_2
     assert worker._state.active_layer is Layer.L2
+
+
+# --- manual class assignment (_apply_class_overrides is a pure function) ---
+
+
+def test_apply_class_overrides_sets_operator_provenance() -> None:
+    track = make_track(track_id=1, cls=None, cls_source=None)
+    result = _apply_class_overrides([track], {1: TargetClass.F16})
+    assert result[0].cls is TargetClass.F16
+    assert result[0].cls_source == "operator"
+
+
+def test_apply_class_overrides_reports_model_provenance_with_no_override() -> None:
+    track = make_track(track_id=1, cls=TargetClass.UAV, cls_source="model")
+    result = _apply_class_overrides([track], {})
+    assert result[0].cls is TargetClass.UAV
+    assert result[0].cls_source == "model"
+
+
+def test_apply_class_overrides_reports_none_provenance_when_unclassified() -> None:
+    track = make_track(track_id=1, cls=None, cls_source=None)
+    result = _apply_class_overrides([track], {})
+    assert result[0].cls is None
+    assert result[0].cls_source is None
+
+
+def test_apply_class_overrides_survives_model_voting() -> None:
+    # A track the model itself voted UAV on this frame -- the override
+    # must still win, not the model's own (different) vote.
+    track = make_track(track_id=1, cls=TargetClass.UAV, cls_source="model")
+    result = _apply_class_overrides([track], {1: TargetClass.F16})
+    assert result[0].cls is TargetClass.F16
+    assert result[0].cls_source == "operator"
+
+
+def test_apply_class_overrides_ignores_a_different_tracks_override() -> None:
+    track = make_track(track_id=2, cls=None, cls_source=None)
+    result = _apply_class_overrides([track], {1: TargetClass.F16})
+    assert result[0].cls is None
+    assert result[0].cls_source is None
+
+
+def test_operator_assigned_class_feeds_range_gate() -> None:
+    """An operator override is not merely cosmetic -- it flows into
+    RangeGate exactly like a model-produced class would, which is the
+    whole point: Stage 3's per-class range rules become testable without
+    a real classifier.
+    """
+    track = make_track(track_id=1, cls=None, cls_source=None, range_m=12.0)
+    overridden = _apply_class_overrides([track], {1: TargetClass.UAV})[0]
+    # UAV's own RANGE_RULES entry is (0.0, 15.0) -- 12m passes.
+    passed, reason = RangeGate.evaluate(overridden.cls, overridden.range_m, Stage.STAGE_3)
+    assert passed is True
+    assert reason is None
+
+    out_of_range = make_track(track_id=1, cls=None, cls_source=None, range_m=20.0)
+    overridden = _apply_class_overrides([out_of_range], {1: TargetClass.UAV})[0]
+    passed, reason = RangeGate.evaluate(overridden.cls, overridden.range_m, Stage.STAGE_3)
+    assert passed is False
+
+
+# --- manual class assignment: end to end through a real tick ---
+
+
+def test_set_track_class_updates_the_live_track_next_tick(qtbot):
+    clock = FakeClock()
+    worker = _make_worker(clock)
+    clock.advance(_TICK_DT)
+    worker._link_worker.tick()
+    worker.tick()
+    assert worker._state.tracks, "synthetic source should have produced a track by now"
+    track_id = worker._state.tracks[0].track_id
+
+    worker.set_track_class(track_id, TargetClass.F16)
+    clock.advance(_TICK_DT)
+    worker._link_worker.tick()
+    worker.tick()
+
+    track = next(t for t in worker._state.tracks if t.track_id == track_id)
+    assert track.cls is TargetClass.F16
+    assert track.cls_source == "operator"
+
+
+def test_class_override_persists_across_several_frames(qtbot):
+    clock = FakeClock()
+    worker = _make_worker(clock)
+    clock.advance(_TICK_DT)
+    worker._link_worker.tick()
+    worker.tick()
+    track_id = worker._state.tracks[0].track_id
+
+    worker.set_track_class(track_id, TargetClass.MISSILE)
+    for _ in range(5):
+        clock.advance(_TICK_DT)
+        worker._link_worker.tick()
+        worker.tick()
+        track = next(t for t in worker._state.tracks if t.track_id == track_id)
+        assert track.cls is TargetClass.MISSILE
+        assert track.cls_source == "operator"
+
+
+def test_clear_track_class_restores_unknown(qtbot):
+    clock = FakeClock()
+    worker = _make_worker(clock)
+    clock.advance(_TICK_DT)
+    worker._link_worker.tick()
+    worker.tick()
+    track_id = worker._state.tracks[0].track_id
+
+    worker.set_track_class(track_id, TargetClass.F16)
+    clock.advance(_TICK_DT)
+    worker._link_worker.tick()
+    worker.tick()
+    assert worker._state.class_overrides.get(track_id) is TargetClass.F16
+
+    worker.clear_track_class(track_id)
+    clock.advance(_TICK_DT)
+    worker._link_worker.tick()
+    worker.tick()
+
+    track = next(t for t in worker._state.tracks if t.track_id == track_id)
+    assert track.cls is None
+    assert track.cls_source is None
+    assert track_id not in worker._state.class_overrides
+
+
+def test_class_override_dies_with_the_track_id(qtbot):
+    """A lost-and-reacquired target gets a fresh track_id from
+    TrackManager -- the override must not silently reattach to it, since
+    identity was not preserved. Drives a real TrackManager through its
+    own TRACK_LOST_MS aging-out (not a directly-poked SystemState), by
+    starving it of detections once the override is set.
+    """
+    clock = FakeClock()
+    worker = _make_worker(clock)
+    clock.advance(_TICK_DT)
+    worker._link_worker.tick()
+    worker.tick()
+    track_id = worker._state.tracks[0].track_id
+    worker.set_track_class(track_id, TargetClass.HELICOPTER)
+    clock.advance(_TICK_DT)
+    worker._link_worker.tick()
+    worker.tick()
+    assert track_id in worker._state.class_overrides
+
+    # No more detections from here on -- TrackManager itself ages the
+    # track out past TRACK_LOST_MS, then genuinely drops it (see its own
+    # update()'s docstring: a track already emitted once as LOST is
+    # pruned on the *next* call).
+    worker._detector.detect = lambda frame, debug=False: ([], None)
+    lost_ticks = int(core_config.TRACK_LOST_MS / 1000.0 / _TICK_DT) + 5
+    for _ in range(lost_ticks):
+        clock.advance(_TICK_DT)
+        worker._link_worker.tick()
+        worker.tick()
+
+    assert worker._state.tracks == ()
+    assert track_id not in worker._state.class_overrides

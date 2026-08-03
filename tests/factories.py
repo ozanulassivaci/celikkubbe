@@ -26,6 +26,8 @@ def make_track(
     iff: IFF = IFF.HOSTILE,
     status: TrackStatus = TrackStatus.CONFIRMED,
     risk_score: float = 50.0,
+    cls_source: str | None = "model",
+    bbox: tuple[float, float, float, float] = (0.1, 0.1, 0.2, 0.2),
 ) -> Track:
     return Track(
         track_id=track_id,
@@ -34,12 +36,13 @@ def make_track(
         range_m=range_m,
         range_source=range_source,
         iff=iff,
-        bbox=(0.1, 0.1, 0.2, 0.2),
+        bbox=bbox,
         velocity=(0.0, 0.0),
         status=status,
         risk_score=risk_score,
         frames_confirmed=5,
         last_seen_t=0.0,
+        cls_source=cls_source if cls is not None else None,
     )
 
 
@@ -99,6 +102,7 @@ def make_state(
     commanded_tilt_deg: float | None = None,
     telemetry: Telemetry | None = None,
     last_self_test=None,
+    class_overrides: dict[int, TargetClass] | None = None,
 ) -> SystemState:
     return SystemState(
         stage=stage,
@@ -116,4 +120,5 @@ def make_state(
         commanded_tilt_deg=commanded_tilt_deg,
         telemetry=telemetry,
         last_self_test=last_self_test,
+        class_overrides=class_overrides if class_overrides is not None else {},
     )

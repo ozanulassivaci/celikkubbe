@@ -115,6 +115,7 @@ def test_system_state_holds_tracks() -> None:
         commanded_tilt_deg=None,
         telemetry=None,
         last_self_test=None,
+        class_overrides={},
     )
     assert state.tracks[0].track_id == 1
     assert state.fallback_reason is None
@@ -137,6 +138,7 @@ def test_system_state_is_frozen() -> None:
         commanded_tilt_deg=None,
         telemetry=None,
         last_self_test=None,
+        class_overrides={},
     )
     try:
         state.selected_track_id = 5  # type: ignore[misc]

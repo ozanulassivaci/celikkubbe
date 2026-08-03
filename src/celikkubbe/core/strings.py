@@ -51,6 +51,10 @@ def describe(reason: ReasonCode) -> str:
 # rather than half in a widget's f-string.
 UI_LABEL_TR: dict[str, str] = {
     "UNKNOWN_CLASS": "BİLİNMEYEN",
+    # Suffix marking an operator-assigned class -- never omitted, so a
+    # manual assignment is never visually indistinguishable from a
+    # model-produced one. "EL" (hand) -- assigned by hand, not by a model.
+    "CLASS_SOURCE_OPERATOR_TAG": "[EL]",
     "NOT_CALIBRATED": "KALİBRE DEĞİL",
     "TARGET_LOCKED": "HEDEF KİLİTLİ",
     "AXIS_PAN": "PAN",

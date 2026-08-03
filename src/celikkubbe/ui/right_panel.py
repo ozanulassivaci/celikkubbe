@@ -423,7 +423,8 @@ class RightPanel(QWidget):
             self._locked_target_label.setStyleSheet(f"color: {theme.TEXT_DIM};")
             self._locked_confidence_label.setText("")
             return
-        self._locked_target_label.setText(f"{class_label(track.cls)} — {IFF_LABEL_TR[track.iff]}")
+        cls_label = class_label(track.cls, track.cls_source)
+        self._locked_target_label.setText(f"{cls_label} — {IFF_LABEL_TR[track.iff]}")
         self._locked_target_label.setStyleSheet(
             f"color: {_IFF_TEXT_COLOR[track.iff]}; font-weight: 600;"
         )
