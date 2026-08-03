@@ -516,6 +516,39 @@ def test_h_key_toggles_the_tuning_window(qtbot):
     assert not window._tuning_window.isVisible()
 
 
+def test_right_panel_tuning_button_opens_the_tuning_window(qtbot):
+    clock = FakeClock()
+    window, _worker, _link = _make_window(clock)
+    qtbot.addWidget(window)
+    assert window._tuning_window is None
+
+    window._right_panel.tuning_window_requested.emit()
+
+    assert window._tuning_window is not None
+    assert window._tuning_window.isVisible()
+
+
+def test_tools_menu_has_an_action_that_opens_the_tuning_window(qtbot):
+    clock = FakeClock()
+    window, _worker, _link = _make_window(clock)
+    qtbot.addWidget(window)
+    assert window._tuning_window is None
+
+    tools_menu = next(
+        action.menu()
+        for action in window.menuBar().actions()
+        if action.menu() is not None and action.menu().title() == strings.UI_LABEL_TR["TOOLS_MENU"]
+    )
+    tuning_action = next(
+        a for a in tools_menu.actions() if a.text() == strings.UI_LABEL_TR["OPEN_TUNING_WINDOW"]
+    )
+
+    tuning_action.trigger()
+
+    assert window._tuning_window is not None
+    assert window._tuning_window.isVisible()
+
+
 def test_f1_key_toggles_the_help_overlay(qtbot):
     clock = FakeClock()
     window, _worker, _link = _make_window(clock)

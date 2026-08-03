@@ -104,6 +104,7 @@ class RightPanel(QWidget):
     zero_requested = pyqtSignal(object)  # Axis
     jog_pressed = pyqtSignal(object, int, float)  # Axis, direction, speed_dps
     jog_released = pyqtSignal()
+    tuning_window_requested = pyqtSignal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -140,6 +141,7 @@ class RightPanel(QWidget):
         layout.addWidget(self._build_manual_pad())
         layout.addWidget(self._build_speed_slider())
         layout.addLayout(self._build_homing_row())
+        layout.addWidget(self._build_tuning_button())
         layout.addStretch(1)
 
         scroll.setWidget(container)
@@ -243,6 +245,16 @@ class RightPanel(QWidget):
         row.addWidget(self._homing_pan_button)
         row.addWidget(self._homing_tilt_button)
         return row
+
+    def _build_tuning_button(self) -> QPushButton:
+        # Previously only reachable via the undocumented H shortcut --
+        # a demonstration operator has no way to discover that. This
+        # button and MainWindow's menu entry are the two documented
+        # ways in; H still works, unchanged, for whoever already knows it.
+        button = QPushButton(UI_LABEL_TR["OPEN_TUNING_WINDOW"])
+        button.setFixedHeight(36)
+        button.clicked.connect(self.tuning_window_requested.emit)
+        return button
 
     # --- construction: pinned-bottom safety region ---
     # Never move ESTOP/EMNİYET KİLİDİ/ATIŞ/warning into the scroll area

@@ -12,6 +12,7 @@ the version string lives in the status strip instead.
 from __future__ import annotations
 
 from PyQt6.QtCore import QEvent, Qt, QTimer
+from PyQt6.QtGui import QAction
 from PyQt6.QtWidgets import (
     QApplication,
     QHBoxLayout,
@@ -326,6 +327,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("OZU IEEE RAS ÇELİKKUBBE")
         self.resize(1400, 800)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self._build_menu_bar()
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -396,6 +398,7 @@ class MainWindow(QMainWindow):
         panel.stage_selected.connect(self._on_stage_selected)
         panel.fire_pressed.connect(lambda: self._set_fire_and_arm_source("gui", True))
         panel.fire_released.connect(lambda: self._set_fire_and_arm_source("gui", False))
+        panel.tuning_window_requested.connect(self._toggle_tuning_window)
 
     def _wire_gamepad(self, gamepad: GamepadWorker) -> None:
         gamepad.jog_axis_changed.connect(self._on_gamepad_jog_axis_changed)
@@ -620,6 +623,15 @@ class MainWindow(QMainWindow):
     def _on_gamepad_jog_axis_changed(self, axis: Axis, speed_dps: float) -> None:
         direction = 1 if speed_dps >= 0.0 else -1
         self._worker.request_jog(axis, direction, abs(speed_dps))
+
+    def _build_menu_bar(self) -> None:
+        # Second documented way into the tuning window, alongside
+        # RightPanel's own button -- see right_panel.py's
+        # _build_tuning_button. H still works too, unchanged.
+        tools_menu = self.menuBar().addMenu(UI_LABEL_TR["TOOLS_MENU"])
+        tuning_action = QAction(UI_LABEL_TR["OPEN_TUNING_WINDOW"], self)
+        tuning_action.triggered.connect(self._toggle_tuning_window)
+        tools_menu.addAction(tuning_action)
 
     def _toggle_tuning_window(self) -> None:
         if self._tuning_window is None:
