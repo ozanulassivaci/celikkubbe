@@ -156,6 +156,7 @@ HELP_CONTROLS_TR: tuple[tuple[str, str], ...] = (
     ("ESC", "Acil durdurma"),
     ("1 / 2 / 3", "Aşama seçimi"),
     ("H", "HSV ayarları penceresi"),
+    ("O", "HSV maske katmanını göster / gizle"),
     ("F1", "Bu yardım ekranı"),
 )
 

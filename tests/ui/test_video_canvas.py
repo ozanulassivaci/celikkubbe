@@ -25,11 +25,13 @@ from celikkubbe.ui import theme
 from celikkubbe.ui.snapshot import HealthSnapshot, PipelineTimings, UiSnapshot
 from celikkubbe.ui.video_canvas import (
     VideoCanvas,
+    build_mask_overlay_bgra,
     compute_letterbox,
     frame_to_pixmap,
     indicator_row_top,
     inset_point,
     lock_banner_rect,
+    mask_overlay_to_pixmap,
     place_badge,
     place_label,
 )
@@ -397,6 +399,83 @@ def test_frame_to_pixmap_survives_source_buffer_mutation():
     result = pixmap.toImage().convertToFormat(QImage.Format.Format_RGB32)
     sampled = QColor(result.pixel(5, 5))
     assert (sampled.blue(), sampled.green(), sampled.red()) == (10, 20, 30)
+
+
+# --- mask overlay ---
+
+
+def test_build_mask_overlay_bgra_tints_active_pixels_by_class():
+    hostile_mask = np.zeros((10, 10), dtype=np.uint8)
+    hostile_mask[0:5, 0:5] = 255
+    friendly_mask = np.zeros((10, 10), dtype=np.uint8)
+    friendly_mask[5:10, 5:10] = 255
+
+    bgra = build_mask_overlay_bgra({"hostile": hostile_mask, "friendly": friendly_mask})
+
+    assert bgra.shape == (10, 10, 4)
+    assert tuple(bgra[2, 2]) == (10, 10, 245, 130)  # hostile region, BGRA
+    assert tuple(bgra[7, 7]) == (224, 163, 0, 130)  # friendly region, BGRA
+    assert tuple(bgra[0, 9]) == (0, 0, 0, 0)  # untouched pixel stays fully transparent
+
+
+def test_build_mask_overlay_bgra_skips_an_unrecognised_class_name():
+    mask = np.full((4, 4), 255, dtype=np.uint8)
+
+    bgra = build_mask_overlay_bgra({"unknown": mask})
+
+    assert np.all(bgra == 0)
+
+
+def test_build_mask_overlay_bgra_empty_input_returns_empty_array():
+    assert build_mask_overlay_bgra({}).shape == (0, 0, 4)
+
+
+def test_mask_overlay_to_pixmap_round_trips_colour_and_alpha():
+    mask = np.full((6, 6), 255, dtype=np.uint8)
+    bgra = build_mask_overlay_bgra({"hostile": mask})
+
+    pixmap = mask_overlay_to_pixmap(bgra)
+
+    # QColor(int) treats the int as opaque RGB and always reports alpha
+    # 255 regardless of the pixel's real value -- pixelColor() is the one
+    # that actually round-trips a QImage's own per-pixel alpha channel.
+    sampled = pixmap.toImage().pixelColor(3, 3)
+    assert (sampled.blue(), sampled.green(), sampled.red()) == (10, 10, 245)
+    assert sampled.alpha() == 130
+
+
+def test_canvas_paints_mask_overlay_tint_over_the_frame(qapp):
+    canvas = VideoCanvas()
+    canvas.resize(400, 300)
+    canvas.set_snapshot(_snapshot(frame=_frame(400, 300)))
+    mask = np.full((300, 400), 255, dtype=np.uint8)
+    canvas.set_mask_overlay(mask_overlay_to_pixmap(build_mask_overlay_bgra({"hostile": mask})))
+
+    image = QImage(canvas.size(), QImage.Format.Format_RGB32)
+    image.fill(QColor(theme.BG_BASE))
+    painter = QPainter(image)
+    canvas.render(painter)
+    painter.end()
+
+    # Centre of a frame full of the plain background colour, now tinted
+    # hostile-red -- confirms the overlay actually reaches the paint path,
+    # not just VideoCanvas's own stored attribute.
+    sampled = QColor(image.pixel(200, 150))
+    assert sampled.red() > sampled.blue()
+    assert sampled.red() > 100
+
+
+def test_canvas_clears_mask_overlay_when_set_to_none(qapp):
+    canvas = VideoCanvas()
+    canvas.resize(400, 300)
+    canvas.set_snapshot(_snapshot(frame=_frame(400, 300)))
+    mask = np.full((300, 400), 255, dtype=np.uint8)
+    canvas.set_mask_overlay(mask_overlay_to_pixmap(build_mask_overlay_bgra({"hostile": mask})))
+    assert canvas._mask_overlay_pixmap is not None
+
+    canvas.set_mask_overlay(None)
+
+    assert canvas._mask_overlay_pixmap is None
 
 
 # --- click to aim ---

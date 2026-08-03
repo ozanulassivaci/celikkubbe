@@ -149,6 +149,68 @@ def frame_to_pixmap(image: np.ndarray) -> QPixmap:
     return QPixmap.fromImage(qimage)
 
 
+# Same competition colours as theme.HOSTILE/theme.FRIENDLY (which are
+# themselves the confirmed target hex colours), converted to BGR -- the
+# mask overlay tints each class the colour of the target it is actually
+# thresholding for, not an arbitrary UI accent.
+MASK_OVERLAY_COLOR_BGR: dict[str, tuple[int, int, int]] = {
+    "hostile": (10, 10, 245),  # #F50A0A
+    "friendly": (224, 163, 0),  # #00A3E0
+}
+# Visible against the live scene without hiding it entirely -- the whole
+# point of overlaying on real video rather than a separate mask panel is
+# seeing mask coverage *in place*, which a fully opaque tint would defeat.
+MASK_OVERLAY_ALPHA = 130
+
+
+def build_mask_overlay_bgra(
+    hsv_masks: dict[str, np.ndarray],
+    color_bgr_by_class: dict[str, tuple[int, int, int]] = MASK_OVERLAY_COLOR_BGR,
+    alpha: int = MASK_OVERLAY_ALPHA,
+) -> np.ndarray:
+    """Combines one or more per-class HSV threshold masks into a single
+    BGRA image, each class tinted its own colour -- a pure function so
+    the compositing itself is unit-testable without a paint cycle, the
+    same reasoning compute_letterbox/frame_to_pixmap were already
+    extracted for. An unrecognised class name in ``hsv_masks`` (no entry
+    in ``color_bgr_by_class``) is skipped rather than guessing a colour,
+    since a mistuned/renamed class showing no tint at all is a more
+    honest failure mode than an arbitrary one. Where two classes'
+    thresholds overlap (not expected -- hostile and friendly hue ranges
+    do not intersect -- but not assumed here), the later class in
+    ``hsv_masks``' own iteration order wins outright rather than
+    blending, since a mixed tint would not name either class legibly.
+    """
+    if not hsv_masks:
+        return np.zeros((0, 0, 4), dtype=np.uint8)
+    height, width = next(iter(hsv_masks.values())).shape
+    out = np.zeros((height, width, 4), dtype=np.uint8)
+    for class_name, mask in hsv_masks.items():
+        color = color_bgr_by_class.get(class_name)
+        if color is None:
+            continue
+        active = mask > 0
+        out[active, 0] = color[0]
+        out[active, 1] = color[1]
+        out[active, 2] = color[2]
+        out[active, 3] = alpha
+    return out
+
+
+def mask_overlay_to_pixmap(bgra: np.ndarray) -> QPixmap:
+    """BGRA numpy array -> QPixmap via Format_ARGB32 -- the alpha-carrying
+    counterpart to frame_to_pixmap's own BGR888 conversion, same
+    copy-before-QImage reasoning (see that function's own docstring).
+    """
+    contiguous = np.ascontiguousarray(bgra)
+    height, width = contiguous.shape[:2]
+    bytes_per_line = contiguous.strides[0]
+    qimage = QImage(
+        contiguous.data, width, height, bytes_per_line, QImage.Format.Format_ARGB32
+    ).copy()
+    return QPixmap.fromImage(qimage)
+
+
 def place_label(box: QRectF, label_w: float, label_h: float, frame: QRectF) -> QRectF:
     """Where a detection label should sit: just above ``box``, flipped
     below it if that would go above the frame's top edge, then clamped
@@ -251,6 +313,12 @@ class VideoCanvas(QWidget):
         self._pixmap: QPixmap | None = None
         self._transform = _EMPTY_TRANSFORM
         self._source_label = ""
+        # Set by MainWindow's own throttled re-detection, mirroring
+        # TuningWindow's "re-run detect(debug=True) itself, throttled and
+        # visibility-gated" pattern -- this widget only ever paints
+        # whatever pixmap it is handed, the same separation set_snapshot
+        # already keeps from the pipeline's own detection loop.
+        self._mask_overlay_pixmap: QPixmap | None = None
 
         self._pan_gauge = AngleGauge(*config.PAN_LIMIT_DEG, parent=self)
         self._tilt_gauge = AngleGauge(*config.TILT_LIMIT_DEG, parent=self)
@@ -290,6 +358,15 @@ class VideoCanvas(QWidget):
         self._update_gauges(snapshot)
         self.update()
 
+    def set_mask_overlay(self, pixmap: QPixmap | None) -> None:
+        """None clears the overlay immediately -- used both when the
+        toggle turns off and while it is on but no fresh mask has been
+        computed yet, so a stale tint never lingers after the underlying
+        scene has moved on.
+        """
+        self._mask_overlay_pixmap = pixmap
+        self.update()
+
     def transform(self) -> LetterboxTransform:
         return self._transform
 
@@ -327,6 +404,14 @@ class VideoCanvas(QWidget):
                 self._transform.displayed_h,
             )
             painter.drawPixmap(target, self._pixmap, QRectF(self._pixmap.rect()))
+
+            # Drawn over the same target rect as the base pixmap above --
+            # the mask was computed from this exact frame, so it lines up
+            # pixel-for-pixel without a transform of its own.
+            if self._mask_overlay_pixmap is not None:
+                painter.drawPixmap(
+                    target, self._mask_overlay_pixmap, QRectF(self._mask_overlay_pixmap.rect())
+                )
 
         if self._snapshot is not None:
             self._draw_overlay(painter, self._snapshot)

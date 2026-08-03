@@ -49,7 +49,7 @@ from celikkubbe.ui.right_panel import RightPanel
 from celikkubbe.ui.snapshot import UiSnapshot
 from celikkubbe.ui.theme import StatusBadge
 from celikkubbe.ui.tuning_window import TuningWindow
-from celikkubbe.ui.video_canvas import VideoCanvas
+from celikkubbe.ui.video_canvas import VideoCanvas, build_mask_overlay_bgra, mask_overlay_to_pixmap
 
 _STATUS_STRIP_HEIGHT_PX = 28
 _ERROR_TOAST_MS = 5000
@@ -79,6 +79,13 @@ _MANUAL_CLASS_KEYS: dict[int, TargetClass] = {
     Qt.Key.Key_D: TargetClass.UAV,
     Qt.Key.Key_K: TargetClass.HELICOPTER,
 }
+# Throttled the same way TuningWindow's own live preview is (see that
+# module's _PREVIEW_UPDATE_HZ) -- re-running detect(debug=True) on every
+# single snapshot, forever, whether or not O has ever been pressed, would
+# pay the extra per-frame cost (building debug masks, plus compositing
+# and converting them to a QPixmap) for a feature most sessions never
+# turn on.
+_MASK_OVERLAY_UPDATE_HZ = 10.0
 
 _MODE_COLOR: dict[Mode, str] = {
     Mode.M1_INIT: theme.TEXT_DIM,
@@ -323,6 +330,8 @@ class MainWindow(QMainWindow):
         self._latest_snapshot: UiSnapshot | None = None
         self._held_jog_key: int | None = None
         self._tuning_window: TuningWindow | None = None
+        self._mask_overlay_enabled = False
+        self._last_mask_overlay_t: float | None = None
 
         self.setWindowTitle("OZU IEEE RAS ÇELİKKUBBE")
         self.resize(1400, 800)
@@ -458,6 +467,8 @@ class MainWindow(QMainWindow):
             self._toggle_help_overlay()
         elif key in _MANUAL_CLASS_KEYS:
             self._assign_class_to_selected_track(_MANUAL_CLASS_KEYS[key])
+        elif key == Qt.Key.Key_O:
+            self._toggle_mask_overlay()
         else:
             super().keyPressEvent(event)
             return
@@ -494,6 +505,36 @@ class MainWindow(QMainWindow):
         self._left_panel.update_from_snapshot(snapshot)
         self._right_panel.update_from_snapshot(snapshot)
         self._update_overlays(snapshot)
+        if self._mask_overlay_enabled:
+            self._maybe_update_mask_overlay(snapshot)
+
+    def _toggle_mask_overlay(self) -> None:
+        self._mask_overlay_enabled = not self._mask_overlay_enabled
+        if not self._mask_overlay_enabled:
+            # Cleared immediately, not left to expire on its own -- a
+            # stale tint hanging over a scene that has since moved on
+            # would be actively misleading, the same reasoning
+            # TuningWindow's own preview stops updating (rather than
+            # freezing on the last frame) once hidden.
+            self._last_mask_overlay_t = None
+            self._canvas.set_mask_overlay(None)
+        elif self._latest_snapshot is not None:
+            self._maybe_update_mask_overlay(self._latest_snapshot, force=True)
+
+    def _maybe_update_mask_overlay(self, snapshot: UiSnapshot, force: bool = False) -> None:
+        now = snapshot.t
+        if (
+            not force
+            and self._last_mask_overlay_t is not None
+            and (now - self._last_mask_overlay_t) < 1.0 / _MASK_OVERLAY_UPDATE_HZ
+        ):
+            return
+        self._last_mask_overlay_t = now
+        _detections, debug = self._worker.detector.detect(snapshot.frame, debug=True)
+        if debug is None:
+            return
+        bgra = build_mask_overlay_bgra(debug.hsv_masks)
+        self._canvas.set_mask_overlay(mask_overlay_to_pixmap(bgra))
 
     def _update_overlays(self, snapshot: UiSnapshot) -> None:
         """At most one of selftest/safe is ever shown -- enforced directly

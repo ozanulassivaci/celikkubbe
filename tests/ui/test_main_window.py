@@ -549,6 +549,40 @@ def test_tools_menu_has_an_action_that_opens_the_tuning_window(qtbot):
     assert window._tuning_window.isVisible()
 
 
+def test_o_key_toggles_the_mask_overlay_and_populates_the_canvas(qtbot):
+    clock = FakeClock()
+    window, worker, _link = _make_window(clock)
+    qtbot.addWidget(window)
+    _settle_self_test(worker, clock)
+    _tick(worker, clock)
+    assert window._mask_overlay_enabled is False
+    assert window._canvas._mask_overlay_pixmap is None
+
+    qtbot.keyPress(window, Qt.Key.Key_O)
+    _tick(worker, clock)
+
+    assert window._mask_overlay_enabled is True
+    assert window._canvas._mask_overlay_pixmap is not None
+
+    qtbot.keyPress(window, Qt.Key.Key_O)
+
+    assert window._mask_overlay_enabled is False
+    assert window._canvas._mask_overlay_pixmap is None
+
+
+def test_mask_overlay_does_not_update_while_disabled(qtbot):
+    clock = FakeClock()
+    window, worker, _link = _make_window(clock)
+    qtbot.addWidget(window)
+    _settle_self_test(worker, clock)
+
+    for _ in range(5):
+        _tick(worker, clock)
+
+    assert window._mask_overlay_enabled is False
+    assert window._canvas._mask_overlay_pixmap is None
+
+
 def test_f1_key_toggles_the_help_overlay(qtbot):
     clock = FakeClock()
     window, _worker, _link = _make_window(clock)
