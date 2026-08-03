@@ -93,7 +93,16 @@ reference, only as shell/canvas-layer history. `07_populated_panels`,
 `08_tuning_window`, `09_stage1_manual_control` are current: the left
 and right panels both populated with a real mixed hostile/friendly
 scene, the HSV tuning window's live source preview, and Stage 1's manual
-control pad with its three mode cards.
+control pad with its three mode cards. `10_manual_class_assignment`
+(operator-assigned `F-16 [EL]` visible simultaneously on the canvas
+overlay, the left panel's threat card and target list, and the right
+panel's locked-target readout — the `[EL]` provenance tag proving all
+four render sites agree) and `11_eyedropper_calibration` (the tuning
+window's eyedropper row with NEGATİF ÖRNEK active and its result panel
+reporting both classes reject a background sample) are captured against
+`SyntheticSource`, not printed models — no physical models or camera
+exist in this environment; see "Physical measurements still outstanding"
+for the HSV-threshold caveat this implies.
 
 Import direction inside `core/` is strictly one-way:
 
