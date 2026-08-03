@@ -248,14 +248,36 @@ def test_zero_declares_current_position_and_resets_backlash() -> None:
     assert link.true_pan_deg == 0.0
 
 
-def test_soft_estop_command_disarms_and_trips_estop() -> None:
+def test_soft_estop_command_disarms_without_tripping_the_hardware_latch() -> None:
+    # The software `estop` command (docs/protocol.md section 5) stops
+    # motion and disarms, but must NOT set the same persistent estop_active
+    # bit the hardware E-stop button does -- see _handle_soft_estop's own
+    # docstring. Conflating the two made every automatic mode.py
+    # _enter_safe() call (link timeout, camera unhealthy, self-test
+    # failure) permanently and unrecoverably latch telemetry.estop, since
+    # nothing in the normal command set can call release_estop().
     clock = FakeClock()
     link = SimTurretLink(clock)
     link.send(Arm())
     link.send(SoftEstop())
     telem = link.poll()
     assert telem.armed is False
-    assert telem.estop is True
+    assert telem.estop is False
+    assert telem.position_valid is True
+
+
+def test_soft_estop_command_stops_motion() -> None:
+    clock = FakeClock()
+    link = SimTurretLink(clock)
+    link.send(Goto(90.0, 0.0, 50.0, 50.0))
+    _run(link, clock, 0.2)
+    mid_telem = link.poll()
+    assert mid_telem.pan_vel_dps != 0.0
+
+    link.send(SoftEstop())
+    telem = link.poll()
+    assert telem.pan_vel_dps == 0.0
+    assert telem.motion_complete is True
 
 
 def test_release_estop_clears_the_flag() -> None:

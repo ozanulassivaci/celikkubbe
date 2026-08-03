@@ -393,6 +393,61 @@ def test_skip_self_test_has_no_effect_outside_dev_mode(qtbot):
     assert worker._state.mode is Mode.M1_INIT
 
 
+def test_skip_self_test_reaches_and_stays_at_standby_with_a_cooperative_link(qtbot):
+    """Regression test: GEC used to bounce straight back to M4_SAFE (and
+    from there, acknowledging returned to a still-failing self-test --
+    an inescapable loop) because modes.step()'s M2_STANDBY branch is
+    re-evaluated on the very next tick after GEC lands, and a fully
+    latched hardware e-stop (see sim_link._handle_soft_estop's own
+    docstring on the bug this used to be) or a still-unhealthy camera
+    would immediately re-trip it. Using a real, cooperative SimTurretLink
+    (link/camera telemetry stays healthy throughout, unlike _DeadLink)
+    with only a driver alarm keeping the self-test from passing on its
+    own isolates dev_mode's own exemption from those other failure modes
+    -- GEC must reach M2_STANDBY and the system must stay interactive
+    there, not bounce back on the next tick.
+    """
+    clock = FakeClock()
+    source = _make_source(clock)
+    link = SimTurretLink(clock)
+    link.inject_driver_alarm(Axis.PAN)  # keeps the self-test's driver_alarms item failing
+    worker = PipelineWorker(source, link, clock, dev_mode=True)
+    # dev_mode boots into M2_STANDBY directly; force M1_INIT to exercise
+    # the self-test/GEC path itself, independent of how the system might
+    # have gotten back there in the field (a separate concern already
+    # covered by the mode-machine's own M4_SAFE -> ack -> M1_INIT tests).
+    worker._state = dataclasses.replace(worker._state, mode=Mode.M1_INIT)
+
+    for _ in range(5):
+        clock.advance(_TICK_DT)
+        worker._link_worker.tick()
+        worker.tick()
+    assert worker._state.mode is Mode.M1_INIT
+    assert not worker._state.last_self_test.passed
+    alarms_item = next(i for i in worker._state.last_self_test.items if i.name == "driver_alarms")
+    assert not alarms_item.passed
+
+    worker.skip_self_test()
+    for _ in range(10):
+        clock.advance(_TICK_DT)
+        worker._link_worker.tick()
+        worker.tick()
+        assert worker._state.mode is Mode.M2_STANDBY
+
+    # Interactive, not just parked: a manual jog request still reaches
+    # the link and actually moves the axis. Jog on the un-alarmed tilt
+    # axis (pan is deliberately frozen by the injected driver alarm --
+    # see _check_watchdog) and check the exact commanded speed, not just
+    # "nonzero": the self-test's own pan/tilt verification move already
+    # left some residual motion on both axes, so a bare nonzero check
+    # would not actually prove *this* jog request reached the link.
+    worker.request_jog(Axis.TILT, 1, 20.0)
+    for _ in range(2):  # one tick dispatches the Jog, the next observes its velocity
+        clock.advance(_TICK_DT)
+        worker._link_worker.tick()
+    assert worker._link_worker.latest_telemetry.tilt_vel_dps == pytest.approx(20.0)
+
+
 class _DeadLink:
     connected = False
 
@@ -414,11 +469,16 @@ def test_request_estop_reaches_the_link_without_a_pipeline_tick(qtbot):
     """
     clock = FakeClock()
     worker = _make_worker(clock)
+    worker._link.send(Arm())
     worker.request_estop()
     worker._link_worker.tick()
     telemetry = worker._link_worker.latest_telemetry
     assert telemetry is not None
-    assert telemetry.estop
+    # SoftEstop stops motion and disarms -- it must not trip the hardware
+    # estop latch (that is link.inject_estop()'s job); see sim_link's own
+    # _handle_soft_estop docstring.
+    assert telemetry.armed is False
+    assert telemetry.estop is False
 
 
 def test_request_arm_and_disarm_toggle_telemetry_armed(qtbot):

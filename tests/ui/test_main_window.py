@@ -198,7 +198,10 @@ def test_right_panel_estop_signal_reaches_the_link(qtbot):
     window._right_panel.estop_requested.emit()
     worker._link_worker.tick()
 
-    assert worker._link_worker.latest_telemetry.estop
+    # SoftEstop stops motion and disarms -- it must not trip the hardware
+    # estop latch (that is inject_estop()'s job); see sim_link's own
+    # _handle_soft_estop docstring.
+    assert worker._link_worker.latest_telemetry.armed is False
 
 
 def test_right_panel_armed_changed_signal_reaches_the_link(qtbot):
@@ -352,7 +355,7 @@ def test_escape_key_triggers_estop_directly(qtbot):
     qtbot.keyPress(window, Qt.Key.Key_Escape)
     worker._link_worker.tick()
 
-    assert worker._link_worker.latest_telemetry.estop
+    assert worker._link_worker.latest_telemetry.armed is False
 
 
 def test_a_key_toggles_armed(qtbot):
@@ -514,7 +517,7 @@ def test_gamepad_signals_are_wired_through_to_the_worker_and_status_strip(qtbot)
 
     gamepad.estop_requested.emit()
     worker._link_worker.tick()
-    assert worker._link_worker.latest_telemetry.estop
+    assert worker._link_worker.latest_telemetry.armed is False
 
     gamepad.connected_changed.emit(True)
     assert window._status_strip._gamepad_label.text() == strings.UI_LABEL_TR["GAMEPAD_CONNECTED"]

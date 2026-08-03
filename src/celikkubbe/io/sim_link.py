@@ -381,12 +381,39 @@ class SimTurretLink:
             self._armed = False
             self.last_ack = AckResult.OK
         elif isinstance(cmd, SoftEstop):
-            self._trip_estop()
+            self._handle_soft_estop(now)
         elif isinstance(cmd, SetMode):
             self._commanded_mcu_mode = _MODE_TO_MCU_MODE[cmd.mode]
             self.last_ack = AckResult.OK
         elif isinstance(cmd, Home | SetParam):
             self.last_ack = AckResult.OK  # accepted, no behaviour modelled
+
+    def _handle_soft_estop(self, now: float) -> None:
+        """The PC-commanded ``estop`` command (docs/protocol.md section 5):
+        "stop motion, disarm, enter SAFE" -- deliberately NOT the same
+        thing as the hardware E-stop button (``inject_estop``/
+        ``_trip_estop``). The wire protocol's only persistent
+        ``estop_active`` bit, and the "E-stop pressed"/"E-stop released"
+        events, describe the physical NC contact cutting the 48V rail
+        (see ``_trip_estop``'s own docstring); the software command has
+        no release counterpart anywhere in the command table precisely
+        because it is not meant to latch anything -- "enter SAFE" is the
+        PC's own mode transition (modes.py's ``_enter_safe`` always sends
+        `SetMode(M4_SAFE)` alongside this), not a persistent hardware
+        fault. An earlier version of this method called `_trip_estop()`
+        here, which meant every automatic `_enter_safe()` call -- link
+        timeout, camera unhealthy, self-test failure, none of them a real
+        hardware fault -- permanently latched `Telemetry.estop`, since
+        nothing in the normal command set can call `release_estop()`
+        (a fault-injection-only method): once tripped this way, the
+        system could never leave M4_SAFE for real, and the displayed
+        fault reason stayed misleadingly `ESTOP_ACTIVE` regardless of the
+        actual cause. Motors stay powered (no gravity droop, no
+        `position_valid` clear) since a software stop does not cut the
+        48V rail either.
+        """
+        self._handle_stop(now)
+        self._armed = False
 
     def _handle_stop(self, now: float) -> None:
         # "Decelerate to rest" simplified to an immediate stop at the
@@ -471,11 +498,11 @@ class SimTurretLink:
         self.last_ack = AckResult.OK
 
     def _trip_estop(self) -> None:
-        # The hardware E-stop button (inject_estop) and the software
-        # `estop` command (SoftEstop) are electrically different -- the
-        # hardware NC contact cuts the 48V rail, the software one does not
-        # -- but the protocol document gives both the same severity ("enter
-        # SAFE" / disarm, clear position_valid), so both converge here.
+        # The hardware E-stop button only -- see _handle_soft_estop's own
+        # docstring for why the software `estop` command must not call
+        # this. Cuts the 48V rail (droop in _advance_physics, clears
+        # position_valid below), latches until release_estop(), and
+        # emits the hardware-only ESTOP_PRESSED event.
         was_active = self._estop
         self._estop = True
         self._armed = False
