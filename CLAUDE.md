@@ -6,7 +6,7 @@ assume familiarity with Python, control systems, and the code itself.
 ## Status
 
 All layers built: `core/`, `vision/`, `tracking/`, `io/`, `geometry/`,
-`ui/`. All committed, tested, pushed. 671 tests passing (gate is 90% in
+`ui/`. All committed, tested, pushed. 753 tests passing (gate is 90% in
 `pyproject.toml`; actual fluctuates ~94-96% run to run — see Testing
 conventions for why) across every package including `ui/`. The GUI was
 built in four parts — shell/threading/theme/canvas; left/right panels
@@ -24,6 +24,18 @@ computed `min_area_px`, a per-class detection cap, a solidity filter and
 an aspect-ratio filter — added after a webcam in an ordinary room
 produced dozens of spurious red/blue detections tight HSV thresholds
 alone could not fix (see "vision/ decisions and why").
+
+A later field session found the solidity filter itself was backwards for
+this target set — measured directly, a real aircraft silhouette scores
+*lower* on solidity than the skin-tone noise it was meant to reject — and
+diagnosed a second, independent bug: a fragmented mask, not a threshold
+problem, was producing zero detections on an otherwise-fully-covered
+model. Both are fixed; see "vision/ decisions and why" for the
+measurements and the mask-level mechanisms (hole-filling, specular-
+highlight bridging, a gap-width-anchored closing kernel) that replaced
+solidity as the actual fix. A `--diag` flag on both `ui/app.py` and
+`demos/pipeline.py` logs every contour's own per-filter-stage pass/fail
+plus mean HSV, for exactly this kind of diagnosis in the future.
 
 ## Project overview
 
@@ -536,20 +548,29 @@ violates but noise commonly does:
   top N — so on a frame with more survivors than the cap, the *largest*
   contours win, not whichever the contour-scan order happened to reach
   first.
-- **`solidity_min` (default 0.75), on by default** — unlike
-  `require_circularity`. Solidity (contour area over its own convex hull
-  area) doesn't assume anything about the target's silhouette the way
-  circularity does, so it doesn't share circularity's problem of
-  rejecting a legitimately non-circular aircraft. A solid printed model
-  scores close to `1.0` regardless of shape; scattered shadow patches,
-  specular streaks and fragmented blobs — genuinely concave or
-  disconnected-looking noise — score well below.
+- **`solidity_min` (0.75) is measured and reported, but — corrected
+  after this — is NOT gated on by default; `require_solidity` (default
+  `False`) controls that, mirroring `require_circularity`'s own field
+  shape exactly.** The original reasoning above ("a solid printed model
+  scores close to 1.0... scattered noise scores well below") turned out
+  to be backwards for this target set, not just mistuned. Measured
+  directly: a swept-wing aircraft silhouette (fuselage + wings +
+  tailfins, built as a synthetic test shape, no photograph needed)
+  scores solidity **~0.37**; skin-tone blobs sampled from a real live
+  webcam frame scored **0.80–0.91**. A quadcopter's four arms or a
+  helicopter's rotors would score lower still. The filter rejected real
+  targets more readily than the noise it was meant to catch — not a
+  threshold-tuning error, an inverted-with-respect-to-this-problem one,
+  the same category of mistake `require_circularity` already existed to
+  avoid for the identical reason. `solidity_min` itself is left at 0.75
+  as a reference value for whoever re-enables `require_solidity`, not
+  zeroed — zeroing it would make the field lie about its own meaning.
 - **`aspect_ratio_range` (default `(0.2, 5.0)`), via `cv2.minAreaRect`.**
   Rejects long thin colour bands (a strip of wall trim, a doorframe
   edge) no competition target's silhouette resembles.
 
-All four report their specific rejection reason on `Contour.
-reject_reason` (`"area"`, `"solidity"`, `"aspect_ratio"`,
+All structural filters report their specific rejection reason on
+`Contour.reject_reason` (`"area"`, `"solidity"`, `"aspect_ratio"`,
 `"class_cap"`, plus the pre-existing `"circularity"`) so
 `ui/tuning_window.py`'s contour preview can show *why* a box is red, not
 just that it is. That label is drawn with `cv2.putText` directly on the
@@ -562,6 +583,83 @@ tuning window's counts label (`SINIF LİMİTİ: N`) from the general
 accepted/rejected counts — a persistently high value there means real
 targets are being discarded by the cap itself, a different problem from
 a too-tight HSV/area/solidity threshold.
+
+**Mask fragmentation, not a threshold problem, was a second and
+independent bug — a real F-16 model produced zero detections despite a
+mask that looked fully white in the tuning preview.** Root cause:
+glossy printed PLA produces specular highlights (saturation collapses
+toward zero, value blows toward white) exactly where a model's own
+structure creates a raised edge — a wing root, a fuselage seam — and a
+highlight wide enough genuinely severs the HSV threshold mask into
+disconnected pieces, invisible at the tuning window's downscaled preview
+resolution but real in the actual pixel data. Confirmed empirically (a
+6px synthetic highlight across a wing root split one contour into two;
+the identical scene with bridging enabled below stayed one). Fixed with
+two mask-level mechanisms, applied in this order, each only handling
+what the previous one left:
+
+- **`fill_enclosed_holes`, unconditional, free.** A highlight that lands
+  *inside* a silhouette without reaching its outer boundary leaves a
+  fully-enclosed hole; filling it is strictly safe — by definition every
+  side already has mask pixels, so it can never bridge two genuinely
+  separate objects the way blind dilation can. Capped at the detector's
+  own `min_area_px` floor (reused, not a new constant): a hole bigger
+  than the smallest possible real target is more plausibly a genuine
+  structural gap — the space between two wings, seen through the model —
+  than a highlight artifact.
+- **`apply_specular_bridging` (`require_specular_bridging`, default
+  `True` — the one structural toggle that defaults on, because unlike
+  circularity/solidity it fixes a real failure mode instead of fighting
+  one).** Handles a highlight that *does* sever the silhouette, which an
+  enclosed-hole fill cannot touch. Builds `combined = target_mask |
+  highlight_mask` where `highlight_mask = (S < class.sat_min) & (V >
+  highlight_v_min)`, then looks at `combined`'s own connected components:
+  a component more than `highlight_max_fraction` (default 0.5) real
+  target pixels is kept whole, bridging the highlight; a component that
+  is mostly highlight — a bright wall, a highlight touching no target at
+  all — is dropped entirely, so it can never contribute pixels to the
+  final mask. `highlight_v_min`/`highlight_max_fraction` are both
+  exposed in the tuning window: the right highlight brightness depends
+  on the venue's own lighting rig, not on anything derivable from optics.
+- **`morph_kernel` (default `None`, auto), re-anchored to an assumed
+  physical gap width via `compute_morph_kernel_px`, not to the target's
+  own silhouette size.** An earlier draft of this scaled the kernel with
+  `min_area_px`'s own target-size formula; confirmed empirically wrong
+  by direction: at a drone-at-max-range-sized silhouette (~19px), that
+  scaling computed a 3px kernel, which failed to bridge even a
+  proportionally-scaled 2px gap, while a fixed 5px kernel succeeded — a
+  specular highlight's width is a property of the light source and the
+  material, not of how big or far the aircraft under it happens to be.
+  `_MORPH_KERNEL_MIN = 5` is the measured floor from that same test, and
+  `_ASSUMED_HIGHLIGHT_GAP_M = 0.02` is explicitly marked PROVISIONAL in
+  the module — guessed, not measured, the same category of mistake
+  `solidity_min` was, pending a photograph of a real model under real
+  venue lighting to measure the highlight's actual pixel width at a
+  known distance.
+
+`--diag` (a flag on both `ui/app.py` and `demos/pipeline.py`) logs one
+row per contour per frame with every structural filter's own pass/fail
+evaluated independently of the elif chain's short-circuiting, plus mean
+HSV and the final verdict — built specifically to answer "does the
+model's contour appear in the raw list at all, and if not, which single
+stage kills it" directly from the log rather than by inference. Also
+configures INFO-level logging itself: nothing in this codebase does so
+otherwise, so every existing `logger.info` call, this one included,
+would otherwise be silently dropped.
+
+**`WebcamSource` requests `cv2.CAP_V4L2` explicitly and verifies it,
+rather than trusting backend auto-selection.** When the requested device
+index fails to open under V4L2 (e.g. it names a metadata-only UVC node,
+not the actual camera — confirmed against real hardware, not
+hypothetical), OpenCV's auto-selection used to fall through to FFMPEG
+silently and report `isOpened() == True` anyway, with a bogus capture
+that never negotiated the requested format — confirmed as the actual
+cause of a reported "resolution changed to 640x480" regression.
+`start()` now raises if the opened backend isn't `"V4L2"`, and
+separately if the negotiated fourcc comes back as a raw `0` (real
+negotiation always reports *some* format, even a fallback one) —
+distinct from simply not supporting MJPG, which still negotiates a real
+format and only logs a warning, not a failure.
 
 ## io/ decisions and why
 
