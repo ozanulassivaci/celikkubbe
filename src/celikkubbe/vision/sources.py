@@ -298,9 +298,26 @@ class WebcamSource:
         self._intrinsics: CameraIntrinsics | None = None
 
     def start(self) -> None:
-        cap = cv2.VideoCapture(self._device)
+        # CAP_V4L2 explicitly, not left to backend auto-selection: when
+        # the requested index fails to open under V4L2 (e.g. it names a
+        # metadata-only UVC node with no capture formats, not the actual
+        # camera), OpenCV's auto-selection silently falls through to
+        # FFMPEG and reports isOpened()==True anyway, with a bogus
+        # capture that never negotiates the requested format -- confirmed
+        # empirically: device 1 "opened" this way but reported an empty
+        # fourcc and a resolution nobody asked for. Requesting V4L2
+        # explicitly makes that same failure loud (isOpened()==False)
+        # instead of silently degraded.
+        cap = cv2.VideoCapture(self._device, cv2.CAP_V4L2)
         if not cap.isOpened():
-            raise RuntimeError(f"could not open webcam device {self._device}")
+            raise RuntimeError(f"could not open webcam device {self._device} via V4L2")
+        backend = cap.getBackendName()
+        if backend != "V4L2":
+            cap.release()
+            raise RuntimeError(
+                f"webcam device {self._device} opened via {backend}, not V4L2 -- "
+                "refusing a capture whose format negotiation cannot be trusted"
+            )
         # FOURCC before resolution: on V4L2, setting the pixel format after
         # the resolution has been negotiated can leave the earlier
         # (often YUYV) negotiation in place instead of re-negotiating.
@@ -309,16 +326,42 @@ class WebcamSource:
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self._requested_height)
         delivered_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         delivered_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        delivered_fourcc = _fourcc_to_str(cap.get(cv2.CAP_PROP_FOURCC))
+        delivered_fourcc_raw = cap.get(cv2.CAP_PROP_FOURCC)
+        delivered_fourcc = _fourcc_to_str(delivered_fourcc_raw)
         delivered_fps = cap.get(cv2.CAP_PROP_FPS)
         logger.info(
-            "webcam device %d negotiated %dx%d %s at %.1f fps",
+            "webcam device %d negotiated %dx%d %s at %.1f fps (backend=%s)",
             self._device,
             delivered_width,
             delivered_height,
             delivered_fourcc,
             delivered_fps,
+            backend,
         )
+        # A real negotiation always reports *some* fourcc, even if not the
+        # one requested -- a raw value of 0 (four NUL bytes once decoded,
+        # not literally an empty string, which is why the string form
+        # can't be checked with a plain truthiness test) means negotiation
+        # never actually happened, confirmed against exactly this failure.
+        if delivered_fourcc_raw == 0.0:
+            cap.release()
+            raise RuntimeError(
+                f"webcam device {self._device} negotiated no usable pixel format "
+                "-- format negotiation failed despite a real V4L2 open"
+            )
+        if delivered_fourcc != _fourcc_to_str(_MJPG_FOURCC):
+            # Not fatal -- a device without MJPG support (e.g. YUYV-only)
+            # still produces valid frames, just at the lower FPS YUYV
+            # negotiates at higher resolutions (see this module's own MJPG
+            # comment above). Silently accepting a *different* format than
+            # requested without saying so is what let this go unnoticed
+            # once already.
+            logger.warning(
+                "webcam device %d did not negotiate MJPG (got %s) -- "
+                "expect a lower FPS than requested",
+                self._device,
+                delivered_fourcc,
+            )
         self._intrinsics = estimated_intrinsics(delivered_width, delivered_height)
         self._cap = cap
 

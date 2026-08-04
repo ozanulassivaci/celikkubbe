@@ -166,19 +166,31 @@ class _FakeCv2Capture:
         width: int,
         height: int,
         fourcc: int = 0,
+        backend_name: str = "V4L2",
+        honor_fourcc_set: bool = True,
     ) -> None:
         self._frames = frames
         self._fps = fps
         self._width = width
         self._height = height
         self._fourcc = fourcc
+        self._backend_name = backend_name
+        # False simulates a device that ignores/fails a requested FOURCC
+        # and keeps reporting its own (possibly 0, "nothing negotiated")
+        # value back -- a real negotiation failure, not just "device set
+        # the fourcc I asked for".
+        self._honor_fourcc_set = honor_fourcc_set
         self.requested_fourcc: int | None = None
+        self.requested_backend: int | None = None
         self._index = 0
         self._opened = True
         self.released = False
 
     def isOpened(self) -> bool:
         return self._opened
+
+    def getBackendName(self) -> str:  # noqa: N802 - matches cv2's own casing
+        return self._backend_name
 
     def get(self, prop_id: int) -> float:
         import cv2
@@ -200,7 +212,8 @@ class _FakeCv2Capture:
             self._index = int(value)
         elif prop_id == cv2.CAP_PROP_FOURCC:
             self.requested_fourcc = int(value)
-            self._fourcc = int(value)
+            if self._honor_fourcc_set:
+                self._fourcc = int(value)
         return True
 
     def read(self) -> tuple[bool, np.ndarray | None]:
@@ -390,3 +403,52 @@ def test_webcam_source_raises_if_device_cannot_be_opened() -> None:
         source = WebcamSource(0, FakeClock())
         with pytest.raises(RuntimeError):
             source.start()
+
+
+def test_webcam_source_raises_if_opened_via_a_non_v4l2_backend() -> None:
+    # The actual bug this guards against: when V4L2 fails to open a given
+    # device index (e.g. it names a metadata-only UVC node, not a real
+    # camera), OpenCV's backend auto-selection used to fall through to
+    # FFMPEG silently and report isOpened()==True anyway, with a bogus
+    # capture that never negotiated the requested format.
+    fake_cap = _FakeCv2Capture(
+        _fake_frames(1), fps=30.0, width=640, height=480, backend_name="FFMPEG"
+    )
+    with patch("celikkubbe.vision.sources.cv2.VideoCapture", return_value=fake_cap):
+        source = WebcamSource(1, FakeClock())
+        with pytest.raises(RuntimeError, match="FFMPEG"):
+            source.start()
+        assert fake_cap.released is True
+
+
+def test_webcam_source_raises_if_no_fourcc_negotiates_at_all() -> None:
+    # A raw fourcc of 0 (four NUL bytes once decoded) means format
+    # negotiation never actually happened, even though the device opened
+    # under the correct backend -- distinct from simply not supporting
+    # MJPG, which still negotiates *some* real format.
+    fake_cap = _FakeCv2Capture(
+        _fake_frames(1), fps=30.0, width=640, height=480, fourcc=0, honor_fourcc_set=False
+    )
+    with patch("celikkubbe.vision.sources.cv2.VideoCapture", return_value=fake_cap):
+        source = WebcamSource(0, FakeClock())
+        with pytest.raises(RuntimeError, match="no usable pixel format"):
+            source.start()
+
+
+def test_webcam_source_warns_but_does_not_raise_when_mjpg_is_unsupported() -> None:
+    # A YUYV-only device (no MJPG support) still produces valid frames,
+    # just at a lower FPS -- this must not be treated the same as a
+    # negotiation failure.
+    yuyv_fourcc = cv2.VideoWriter_fourcc(*"YUYV")
+    fake_cap = _FakeCv2Capture(
+        _fake_frames(1),
+        fps=10.0,
+        width=1280,
+        height=720,
+        fourcc=yuyv_fourcc,
+        honor_fourcc_set=False,
+    )
+    with patch("celikkubbe.vision.sources.cv2.VideoCapture", return_value=fake_cap):
+        source = WebcamSource(0, FakeClock())
+        source.start()  # does not raise
+        assert source.intrinsics.width == 1280
