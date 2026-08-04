@@ -80,9 +80,11 @@ def test_sliders_initialize_from_the_detectors_current_config(qtbot):
     qtbot.addWidget(window)
 
     cfg = worker.detector.config
-    assert window._sliders["morph_kernel"][0].value() == cfg.morph_kernel
-    # min_area_px defaults to None (auto -- computed from optics), shown
-    # as 0 on the slider; see tuning_window._set_min_area's own docstring.
+    # morph_kernel/min_area_px both default to None (auto -- computed
+    # from optics), shown as 0 on their sliders; see tuning_window's own
+    # _set_morph_kernel/_set_min_area docstrings.
+    assert cfg.morph_kernel is None
+    assert window._sliders["morph_kernel"][0].value() == 0
     assert cfg.min_area_px is None
     assert window._sliders["min_area"][0].value() == 0
     hostile = next(c for c in cfg.classes if c.name == "hostile")
@@ -139,6 +141,52 @@ def test_require_circularity_checkbox_applies_to_the_detector(qtbot):
     assert worker.detector.config.require_circularity is True
 
 
+def test_require_solidity_checkbox_applies_to_the_detector(qtbot):
+    clock = FakeClock()
+    worker = _make_worker(clock)
+    window = TuningWindow(worker)
+    qtbot.addWidget(window)
+    assert worker.detector.config.require_solidity is False  # off by default
+
+    window._require_solidity_checkbox.setChecked(True)
+
+    assert worker.detector.config.require_solidity is True
+
+
+def test_require_specular_bridging_checkbox_applies_to_the_detector(qtbot):
+    clock = FakeClock()
+    worker = _make_worker(clock)
+    window = TuningWindow(worker)
+    qtbot.addWidget(window)
+    assert worker.detector.config.require_specular_bridging is True  # on by default
+
+    window._require_specular_bridging_checkbox.setChecked(False)
+
+    assert worker.detector.config.require_specular_bridging is False
+
+
+def test_moving_highlight_v_min_slider_live_applies_to_the_detector(qtbot):
+    clock = FakeClock()
+    worker = _make_worker(clock)
+    window = TuningWindow(worker)
+    qtbot.addWidget(window)
+
+    window._sliders["highlight_v_min"][0].setValue(200)
+
+    assert worker.detector.config.highlight_v_min == 200
+
+
+def test_moving_highlight_max_fraction_slider_applies_as_a_fraction(qtbot):
+    clock = FakeClock()
+    worker = _make_worker(clock)
+    window = TuningWindow(worker)
+    qtbot.addWidget(window)
+
+    window._sliders["highlight_max_fraction"][0].setValue(70)
+
+    assert worker.detector.config.highlight_max_fraction == 0.7
+
+
 def test_moving_hostile_hue_slider_does_not_affect_friendly(qtbot):
     clock = FakeClock()
     worker = _make_worker(clock)
@@ -173,14 +221,15 @@ def test_reset_defaults_restores_widgets_and_detector(qtbot):
     worker = _make_worker(clock)
     window = TuningWindow(worker)
     qtbot.addWidget(window)
-    window._sliders["morph_kernel"][0].setValue(1)
+    window._sliders["morph_kernel"][0].setValue(9)
     window._sliders["hostile_sat"][0].setValue(200)
 
     window._on_reset_defaults()
 
     defaults = ColorDetectorConfig()
     assert worker.detector.config.morph_kernel == defaults.morph_kernel
-    assert window._sliders["morph_kernel"][0].value() == defaults.morph_kernel
+    assert defaults.morph_kernel is None
+    assert window._sliders["morph_kernel"][0].value() == 0
     hostile_default = next(c for c in defaults.classes if c.name == "hostile")
     assert window._sliders["hostile_sat"][0].value() == hostile_default.sat_min
 

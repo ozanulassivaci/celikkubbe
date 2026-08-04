@@ -61,6 +61,46 @@ _MIN_AREA_FRACTION = 0.3  # allows a non-square aircraft silhouette, not a fille
 # 640x480) yields a somewhat smaller fraction.
 _MIN_AREA_ESTIMATED_FRAME_FRACTION = 0.0001
 
+# --- scale-aware morphological closing kernel for ColorDetectorConfig.
+# morph_kernel, applied whenever it is left at its default None -- see
+# compute_morph_kernel_px. ---
+#
+# Anchored to an assumed physical GAP width (a specular highlight or a
+# wing-root/pylon seam), not to the target's own silhouette size the way
+# an earlier draft of this tried it: a bigger aircraft does not have a
+# proportionally bigger paint-quality highlight, so scaling the kernel to
+# target size undershoots exactly the small/distant-target case that
+# needs help most. Confirmed empirically: at a drone-at-max-range-sized
+# silhouette (~19px), a kernel scaled to target size computed to 3px and
+# failed to bridge even a proportionally-scaled 2px gap; a fixed-anchor
+# kernel of 5px did.
+#
+# PROVISIONAL VALUE -- _ASSUMED_HIGHLIGHT_GAP_M has not been measured
+# against a real printed model under real venue lighting; it is a
+# placeholder of the same kind solidity_min=0.75 was, guessed rather than
+# measured. Photograph a model under the actual competition lighting,
+# measure the highlight's width in pixels at a known distance, and
+# replace this constant once that measurement exists.
+_ASSUMED_HIGHLIGHT_GAP_M = 0.02
+# Empirically, a square closing kernel of size k bridges a gap of
+# roughly k-3 px (measured: a 2px gap needed k=5, a 6px gap needed k=9) --
+# this margin converts an expected gap width into a kernel size with a
+# little headroom rather than assuming the two are equal.
+_MORPH_KERNEL_MARGIN_PX = 3
+# Measured directly: k=3 failed to bridge a 2px gap in testing; k=5
+# succeeded. Never derive a kernel below this, regardless of how small
+# the computed gap-at-range works out to be.
+_MORPH_KERNEL_MIN = 5
+_MORPH_KERNEL_MAX = 25
+# "estimated"-quality intrinsics fallback, same reasoning as
+# _MIN_AREA_ESTIMATED_FRAME_FRACTION: fx itself is a guess there, so
+# don't compound it with a physically-scaled gap estimate. Derived by
+# evaluating the reliable-path formula once at 1280x720 (expected_gap_px
+# = 931*0.02/15 = 1.24, +3px margin = 4.24, clamped to the 5px floor
+# anyway) and expressing that as a fraction of frame width instead, so a
+# much higher-resolution "estimated" source is not stuck at the floor.
+_MORPH_KERNEL_ESTIMATED_FRAME_FRACTION = 0.004
+
 # Repo-root config/ -- runtime tuning data, not the compile-time
 # thresholds in core/config.py. Created on first save; absent entirely
 # until then, same convention as geometry.calibration's config/ paths.
@@ -92,7 +132,11 @@ _DEFAULT_CLASSES: tuple[ColorClass, ...] = (
 @dataclass
 class ColorDetectorConfig:
     classes: tuple[ColorClass, ...] = field(default_factory=lambda: _DEFAULT_CLASSES)
-    morph_kernel: int = 5
+    # None -- the closing kernel is computed per frame from optics (see
+    # compute_morph_kernel_px), the same "auto unless overridden" contract
+    # min_area_px already uses. Set an int here to pin a fixed size instead
+    # (e.g. a competition-day preset tuned by eye against the real venue).
+    morph_kernel: int | None = None
     # None -- the structural floor is computed per frame from optics (see
     # compute_min_area_px), which is what a webcam-vs-D435i, or a change
     # to the course's engagement range, should actually drive. Set an int
@@ -105,15 +149,44 @@ class ColorDetectorConfig:
     # that assumed balloons. Circularity is still computed and reported
     # for the tuning panel either way.
     require_circularity: bool = False
-    # On by default, unlike circularity: a solid printed model scores
-    # around 0.9 regardless of its silhouette (solidity does not assume
-    # anything is round), while scattered shadow patches, specular
-    # streaks and fragmented blobs score well below this.
+    # Reference value only, kept for whoever re-enables require_solidity --
+    # NOT a live gate by default. Measured directly against this target
+    # set (see require_solidity's own comment): a swept-wing aircraft
+    # silhouette scores ~0.37, well below a skin-tone blob's ~0.80-0.91.
+    # The filter this value was meant to gate on scores worse on real
+    # targets than on the noise it was meant to reject -- do not re-enable
+    # it on the assumption a stricter value fixes that; the direction is
+    # wrong, not just the number.
     solidity_min: float = 0.75
+    # Off by default, mirroring require_circularity's own reasoning above
+    # for the identical failure mode: a quadcopter's four arms and a
+    # helicopter's rotors are, if anything, less solid than a swept-wing
+    # jet. Solidity is still computed and reported (tuning panel, --diag)
+    # either way -- useful for diagnosis, wrong as a hard gate for this
+    # target set.
+    require_solidity: bool = False
     # (short side / long side is never below this, long/short never
     # above) -- rejects long thin colour bands (a strip of wall trim, a
     # doorframe edge) that no competition target's silhouette resembles.
     aspect_ratio_range: tuple[float, float] = (0.2, 5.0)
+    # On by default, unlike circularity/solidity: this one actually fixes
+    # a real failure mode for this target set rather than fighting it --
+    # see apply_specular_bridging. A specular highlight on glossy PLA
+    # reads as low-saturation, high-value, which is indistinguishable from
+    # a bright wall on saturation/value alone; bridging only trusts a
+    # highlight that is mostly attached to real target pixels.
+    require_specular_bridging: bool = True
+    # Provisional default, not measured against a real printed model under
+    # real venue lighting -- see _HIGHLIGHT_V_MIN's own comment. Exposed in
+    # the tuning window since the right value depends on the venue's own
+    # lighting rig, not on anything derivable from optics.
+    highlight_v_min: int = 230
+    # A component of (target_mask | highlight_mask) is kept only if more
+    # than this fraction of its pixels are real target pixels -- a bright
+    # wall or ceiling tile is nearly all highlight pixels and is rejected;
+    # a model with a highlight streak across it is mostly target pixels
+    # and survives whole.
+    highlight_max_fraction: float = 0.5
     # The course physically cannot present more than three models of one
     # colour; anything beyond this per class, this frame, made it past
     # every HSV/area/solidity/aspect-ratio filter but is still noise, not
@@ -232,6 +305,38 @@ def compute_min_area_px(
     return round((expected_px**2) * area_fraction)
 
 
+def compute_morph_kernel_px(
+    intrinsics: CameraIntrinsics,
+    max_range_m: float = MAX_ENGAGEMENT_RANGE_M,
+    gap_size_m: float = _ASSUMED_HIGHLIGHT_GAP_M,
+    margin_px: int = _MORPH_KERNEL_MARGIN_PX,
+    kernel_min: int = _MORPH_KERNEL_MIN,
+    kernel_max: int = _MORPH_KERNEL_MAX,
+) -> int:
+    """Closing-kernel size, derived from an assumed physical gap width
+    rather than guessed as a fixed pixel count -- see the module's own
+    PROVISIONAL note on ``_ASSUMED_HIGHLIGHT_GAP_M``. Deliberately anchored
+    to the gap, not to the target's own silhouette size the way
+    ``compute_min_area_px`` anchors to the smallest known target: a
+    specular highlight's width is a property of the light source and the
+    material, not of how big or far the aircraft it lands on happens to
+    be, so scaling this like ``min_area_px`` would give the wrong
+    quantity a say over the kernel size (confirmed empirically to
+    undershoot on small/distant targets -- see the module comment).
+
+    A closer target's own highlight subtends more pixels, the same
+    optics-scaling direction ``compute_min_area_px`` already uses for
+    target size, so this still shrinks toward ``kernel_min`` at long
+    range and grows toward ``kernel_max`` up close -- clamped either way.
+    """
+    if not intrinsics.is_reliable:
+        expected_gap_px = intrinsics.width * _MORPH_KERNEL_ESTIMATED_FRAME_FRACTION
+    else:
+        expected_gap_px = intrinsics.fx * gap_size_m / max_range_m
+    kernel = round(expected_gap_px) + margin_px
+    return max(kernel_min, min(kernel_max, kernel))
+
+
 def _depth_range_m(depth: np.ndarray, cx_px: int, cy_px: int, window: int) -> float | None:
     half = window // 2
     y0, y1 = max(0, cy_px - half), min(depth.shape[0], cy_px + half + 1)
@@ -255,12 +360,93 @@ def _size_range_m(pixel_size: float, fx: float, known_sizes_m: tuple[float, ...]
     return fx * max(known_sizes_m) / pixel_size
 
 
+def fill_enclosed_holes(mask: np.ndarray, max_hole_area_px: float) -> np.ndarray:
+    """Fills holes fully enclosed by ``mask`` pixels, up to ``max_hole_area_px``.
+
+    Strictly safer than closing: an enclosed hole by definition has mask
+    pixels on every side of it already, so filling it can never connect
+    two objects that were genuinely separate -- unlike closing, which
+    dilates blindly and can bridge a gap between two distinct nearby
+    targets. This only ever removes gaps that were already surrounded,
+    and reduces how much bridging the closing kernel has to do
+    afterwards, which in turn lets that kernel stay smaller.
+
+    Handles a specular highlight that lands *inside* a silhouette without
+    reaching its outer boundary -- a highlight that severs the silhouette
+    (reaches the outside) is not an enclosed hole at all, and needs
+    apply_specular_bridging instead, not this.
+
+    ``max_hole_area_px`` exists so a genuine gap -- the space between two
+    wings, seen through the model, if the fuselage happens to close it
+    off -- is not silently erased. Callers pass the detector's own
+    min_area_px floor: a hole bigger than the smallest possible real
+    target is more plausibly a real structural gap than a highlight
+    artifact.
+    """
+    contours, hierarchy = cv2.findContours(mask, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
+    if hierarchy is None:
+        return mask
+    filled = mask.copy()
+    for i, h in enumerate(hierarchy[0]):
+        parent = h[3]
+        if parent == -1:
+            continue  # a top-level contour, not a hole
+        if cv2.contourArea(contours[i]) <= max_hole_area_px:
+            cv2.drawContours(filled, [contours[i]], -1, 255, -1)
+    return filled
+
+
+def apply_specular_bridging(
+    hsv: np.ndarray,
+    target_mask: np.ndarray,
+    sat_min: int,
+    highlight_v_min: int,
+    highlight_max_fraction: float,
+) -> np.ndarray:
+    """Recovers a target silhouette severed by a specular highlight,
+    without absorbing unrelated bright surfaces (a wall, a ceiling tile).
+
+    Glossy PLA reflects the light source specularly: saturation collapses
+    toward zero while value goes very high -- indistinguishable from a
+    plain bright wall on saturation/value alone. The distinguishing signal
+    is context, not colour: a highlight sitting *on* a real target is
+    connected to mostly-target pixels; a bright wall is not connected to
+    any meaningful number of them.
+
+    Builds ``combined = target_mask | highlight_mask`` and looks at its
+    connected components rather than ``target_mask``'s own: a component
+    that is more than ``highlight_max_fraction`` real target pixels is
+    kept whole (the union of its target and highlight pixels, bridging
+    the highlight); a component that is mostly highlight -- a wall, or a
+    highlight touching no target at all -- is dropped entirely, so it can
+    never contribute pixels to the final mask.
+    """
+    sat = hsv[:, :, 1]
+    val = hsv[:, :, 2]
+    highlight_mask = ((sat < sat_min) & (val > highlight_v_min)).astype(np.uint8) * 255
+    combined = cv2.bitwise_or(target_mask, highlight_mask)
+
+    num_labels, labels = cv2.connectedComponents(combined)
+    if num_labels <= 1:
+        return target_mask  # no non-background component at all
+    target_bool = target_mask > 0
+    result = np.zeros_like(target_mask)
+    for label in range(1, num_labels):
+        component = labels == label
+        component_size = int(np.count_nonzero(component))
+        target_pixel_count = int(np.count_nonzero(target_bool & component))
+        if target_pixel_count / component_size > highlight_max_fraction:
+            result[component] = 255
+    return result
+
+
 class ColorDetector:
     """The permanent L2 detection layer: per-class HSV threshold -> contours."""
 
     def __init__(self, config: ColorDetectorConfig | None = None) -> None:
         self.config = config or ColorDetectorConfig()
         self._last_logged_min_area_px: int | None = None
+        self._last_logged_morph_kernel_px: int | None = None
         # known_sizes_m is a theoretical assumption (see the module's own
         # "Physical measurements still outstanding" entry in CLAUDE.md),
         # not a measurement -- if the printed models were scaled down for
@@ -280,6 +466,7 @@ class ColorDetector:
         cfg = self.config
         width, height = frame.intrinsics.width, frame.intrinsics.height
         min_area_px = self._resolve_min_area_px(cfg, frame.intrinsics)
+        morph_kernel_px = self._resolve_morph_kernel_px(cfg, frame.intrinsics)
 
         if cfg.roi is not None:
             x1n, y1n, x2n, y2n = cfg.roi
@@ -294,7 +481,7 @@ class ColorDetector:
         # Python-level control loop.
         crop = frame.image[py1:py2, px1:px2]
         hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
-        kernel = np.ones((cfg.morph_kernel, cfg.morph_kernel), np.uint8)
+        kernel = np.ones((morph_kernel_px, morph_kernel_px), np.uint8)
 
         detections: list[Detection] = []
         debug_hsv_masks: dict[str, np.ndarray] = {}
@@ -307,6 +494,17 @@ class ColorDetector:
                 lo = (hue_lo, color_class.sat_min, color_class.val_min)
                 hi = (hue_hi, 255, 255)
                 mask = cv2.bitwise_or(mask, cv2.inRange(hsv, lo, hi))
+
+            # Order matters: bridging can only ADD pixels (recovering a
+            # silhouette a highlight severed), hole-filling then closes
+            # off whatever is left that is fully enclosed, and blind
+            # dilation is the last resort for whatever gap survives both --
+            # each stage only has to handle what the previous one left.
+            if cfg.require_specular_bridging:
+                mask = apply_specular_bridging(
+                    hsv, mask, color_class.sat_min, cfg.highlight_v_min, cfg.highlight_max_fraction
+                )
+            mask = fill_enclosed_holes(mask, min_area_px)
 
             morphed = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
             if debug:
@@ -399,6 +597,25 @@ class ColorDetector:
             self._last_logged_min_area_px = computed
         return computed
 
+    def _resolve_morph_kernel_px(
+        self, cfg: ColorDetectorConfig, intrinsics: CameraIntrinsics
+    ) -> int:
+        if cfg.morph_kernel is not None:
+            return cfg.morph_kernel
+        computed = compute_morph_kernel_px(intrinsics)
+        if computed != self._last_logged_morph_kernel_px:
+            logger.info(
+                "L2 detector: computed morph_kernel = %d px "
+                "(intrinsics quality=%s, fx=%.1f, %dx%d)",
+                computed,
+                intrinsics.quality,
+                intrinsics.fx,
+                intrinsics.width,
+                intrinsics.height,
+            )
+            self._last_logged_morph_kernel_px = computed
+        return computed
+
     def _measure_contour(
         self,
         contour: np.ndarray,
@@ -413,11 +630,12 @@ class ColorDetector:
         bbox_px = (x + px1, y + py1, w, h)
         circularity = 4.0 * math.pi * area / (perimeter**2) if perimeter > 0 else 0.0
 
-        # Solidity: contour area over its own convex hull area. A solid
-        # printed model is close to its own hull (~0.9); scattered shadow
-        # patches, specular streaks and fragmented blobs are not, since
-        # morphological closing does not make a fragmented mask convex,
-        # only connected.
+        # Solidity: contour area over its own convex hull area. Measured
+        # and reported (tuning panel, --diag) regardless of
+        # require_solidity, but NOT gated on by default -- see
+        # ColorDetectorConfig.require_solidity's own comment on why a
+        # swept-wing aircraft scores lower than the skin-tone noise this
+        # was meant to reject.
         hull_area = cv2.contourArea(cv2.convexHull(contour))
         solidity = area / hull_area if hull_area > 0 else 0.0
 
@@ -429,7 +647,7 @@ class ColorDetector:
         aspect_lo, aspect_hi = cfg.aspect_ratio_range
         if area < min_area_px:
             reject_reason = "area"
-        elif solidity < cfg.solidity_min:
+        elif cfg.require_solidity and solidity < cfg.solidity_min:
             reject_reason = "solidity"
         elif not (aspect_lo <= aspect_ratio <= aspect_hi):
             reject_reason = "aspect_ratio"
@@ -478,7 +696,7 @@ class ColorDetector:
             mean_h, mean_s, mean_v = cv2.mean(hsv, mask=contour_mask)[:3]
 
             area_pass = m.area >= min_area_px
-            solidity_pass = m.solidity >= cfg.solidity_min
+            solidity_pass = (not cfg.require_solidity) or m.solidity >= cfg.solidity_min
             aspect_pass = aspect_lo <= m.aspect_ratio <= aspect_hi
             circularity_pass = (not cfg.require_circularity) or m.circularity >= cfg.circularity_min
 
@@ -493,7 +711,7 @@ class ColorDetector:
                 verdict = f"REJECT:{m.reject_reason}"
 
             logger.info(
-                "DIAG %s#%d bbox=%s area=%.1f(min=%d %s) solidity=%.3f(min=%.2f %s) "
+                "DIAG %s#%d bbox=%s area=%.1f(min=%d %s) solidity=%.3f(min=%.2f req=%s %s) "
                 "aspect_ratio=%.2f(range=%.1f-%.1f %s) circularity=%.3f(min=%.2f req=%s %s) "
                 "class_cap=%s hue=%.1f sat=%.1f val=%.1f verdict=%s",
                 class_name,
@@ -504,6 +722,7 @@ class ColorDetector:
                 "PASS" if area_pass else "FAIL",
                 m.solidity,
                 cfg.solidity_min,
+                cfg.require_solidity,
                 "PASS" if solidity_pass else "FAIL",
                 m.aspect_ratio,
                 aspect_lo,
@@ -835,7 +1054,11 @@ def config_to_dict(config: ColorDetectorConfig) -> dict:
         "circularity_min": config.circularity_min,
         "require_circularity": config.require_circularity,
         "solidity_min": config.solidity_min,
+        "require_solidity": config.require_solidity,
         "aspect_ratio_range": list(config.aspect_ratio_range),
+        "require_specular_bridging": config.require_specular_bridging,
+        "highlight_v_min": config.highlight_v_min,
+        "highlight_max_fraction": config.highlight_max_fraction,
         "max_detections_per_class": config.max_detections_per_class,
         "classes": {
             c.name: {
@@ -881,7 +1104,13 @@ def config_from_dict(data: dict) -> ColorDetectorConfig:
         circularity_min=data.get("circularity_min", defaults.circularity_min),
         require_circularity=data.get("require_circularity", defaults.require_circularity),
         solidity_min=data.get("solidity_min", defaults.solidity_min),
+        require_solidity=data.get("require_solidity", defaults.require_solidity),
         aspect_ratio_range=(aspect_range[0], aspect_range[1]),
+        require_specular_bridging=data.get(
+            "require_specular_bridging", defaults.require_specular_bridging
+        ),
+        highlight_v_min=data.get("highlight_v_min", defaults.highlight_v_min),
+        highlight_max_fraction=data.get("highlight_max_fraction", defaults.highlight_max_fraction),
         max_detections_per_class=data.get(
             "max_detections_per_class", defaults.max_detections_per_class
         ),

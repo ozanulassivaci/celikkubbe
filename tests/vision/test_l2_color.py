@@ -12,11 +12,14 @@ from celikkubbe.vision.l2_color import (
     ColorClass,
     ColorDetector,
     ColorDetectorConfig,
+    apply_specular_bridging,
     check_negative_sample,
     compute_min_area_px,
+    compute_morph_kernel_px,
     config_from_dict,
     config_to_dict,
     derive_thresholds,
+    fill_enclosed_holes,
     is_range_estimate_unreliable,
     is_under_resolved,
     list_hsv_presets,
@@ -305,6 +308,49 @@ def test_computed_min_area_px_is_logged(caplog) -> None:
     assert any("min_area_px" in record.message for record in caplog.records)
 
 
+# --- morphological closing kernel, gap-width anchored ---
+
+
+def test_compute_morph_kernel_px_shrinks_toward_the_floor_at_long_range() -> None:
+    near = compute_morph_kernel_px(_reliable_intrinsics(1280, 720, fx=931.0), max_range_m=5.0)
+    far = compute_morph_kernel_px(_reliable_intrinsics(1280, 720, fx=931.0), max_range_m=15.0)
+    assert near >= far
+    assert far == 5  # clamped to the measured minimum at long range
+
+
+def test_compute_morph_kernel_px_never_goes_below_the_measured_minimum() -> None:
+    # A 2px gap on a drone-at-max-range-sized silhouette was NOT bridged
+    # by a kernel scaled to target size (computed to 3); 5 was the
+    # smallest that worked -- never derive below that, however small the
+    # gap-at-range computes to.
+    kernel = compute_morph_kernel_px(_reliable_intrinsics(1280, 720, fx=931.0), max_range_m=15.0)
+    assert kernel >= 5
+
+
+def test_compute_morph_kernel_px_never_exceeds_the_configured_maximum() -> None:
+    kernel = compute_morph_kernel_px(
+        _reliable_intrinsics(1280, 720, fx=931.0), max_range_m=0.01, gap_size_m=5.0
+    )
+    assert kernel == 25
+
+
+def test_compute_morph_kernel_px_falls_back_to_frame_width_fraction_when_estimated() -> None:
+    small_frame = estimated_intrinsics(640, 480)
+    large_frame = estimated_intrinsics(1920, 1080)
+    small_val = compute_morph_kernel_px(small_frame)
+    large_val = compute_morph_kernel_px(large_frame)
+    assert large_val >= small_val
+
+
+def test_computed_morph_kernel_is_logged(caplog) -> None:
+    caplog.set_level(logging.INFO, logger="celikkubbe.vision.l2_color")
+    frame = _blank_frame()
+
+    ColorDetector().detect(frame)
+
+    assert any("morph_kernel" in record.message for record in caplog.records)
+
+
 # --- max_detections_per_class (2b) ---
 
 
@@ -370,12 +416,29 @@ def _draw_plus_shape(image: np.ndarray) -> np.ndarray:
     return out
 
 
-def test_low_solidity_shape_rejected_as_solidity() -> None:
+def test_low_solidity_shape_accepted_by_default() -> None:
+    # require_solidity defaults to False: measured directly against this
+    # target set, a swept-wing aircraft silhouette scores lower on
+    # solidity than the skin-tone noise the filter was meant to reject,
+    # so gating on it by default rejects real targets more readily than
+    # noise. This is the actual fix -- see require_solidity's own comment
+    # on ColorDetectorConfig.
     base = _blank_frame()
     image = _draw_plus_shape(base.image)
     frame = _frame_with_image(image, base)
 
-    detections, debug = ColorDetector().detect(frame, debug=True)
+    detections, _ = ColorDetector().detect(frame)
+
+    assert len(detections) == 1
+
+
+def test_low_solidity_shape_rejected_when_required() -> None:
+    base = _blank_frame()
+    image = _draw_plus_shape(base.image)
+    frame = _frame_with_image(image, base)
+
+    detector = ColorDetector(ColorDetectorConfig(require_solidity=True))
+    detections, debug = detector.detect(frame, debug=True)
 
     assert detections == []
     assert debug is not None
@@ -393,11 +456,14 @@ def test_solid_blob_passes_the_default_solidity_filter() -> None:
 
 
 def test_solidity_min_is_configurable() -> None:
+    # require_solidity=True re-enables the gate; a low enough solidity_min
+    # still lets this ~0.47-solidity shape through even with the gate on,
+    # confirming the threshold itself is configurable, not just the flag.
     base = _blank_frame()
     image = _draw_plus_shape(base.image)
     frame = _frame_with_image(image, base)
 
-    detector = ColorDetector(ColorDetectorConfig(solidity_min=0.0))
+    detector = ColorDetector(ColorDetectorConfig(require_solidity=True, solidity_min=0.0))
     detections, _ = detector.detect(frame)
 
     assert len(detections) == 1
@@ -448,18 +514,35 @@ def test_aspect_ratio_range_is_configurable() -> None:
 def test_new_structural_filter_defaults() -> None:
     cfg = ColorDetectorConfig()
     assert cfg.min_area_px is None
+    assert cfg.morph_kernel is None
     assert cfg.solidity_min == 0.75
+    assert cfg.require_solidity is False
     assert cfg.aspect_ratio_range == (0.2, 5.0)
+    assert cfg.require_specular_bridging is True
+    assert cfg.highlight_v_min == 230
+    assert cfg.highlight_max_fraction == 0.5
     assert cfg.max_detections_per_class == 3
 
 
 def test_config_to_dict_and_back_round_trips_new_filter_fields() -> None:
     config = ColorDetectorConfig(
-        solidity_min=0.5, aspect_ratio_range=(0.1, 8.0), max_detections_per_class=5
+        morph_kernel=9,
+        solidity_min=0.5,
+        require_solidity=True,
+        aspect_ratio_range=(0.1, 8.0),
+        require_specular_bridging=False,
+        highlight_v_min=200,
+        highlight_max_fraction=0.6,
+        max_detections_per_class=5,
     )
     restored = config_from_dict(config_to_dict(config))
+    assert restored.morph_kernel == 9
     assert restored.solidity_min == 0.5
+    assert restored.require_solidity is True
     assert restored.aspect_ratio_range == (0.1, 8.0)
+    assert restored.require_specular_bridging is False
+    assert restored.highlight_v_min == 200
+    assert restored.highlight_max_fraction == 0.6
     assert restored.max_detections_per_class == 5
 
 
@@ -530,22 +613,25 @@ def test_diag_logs_a_row_for_an_accepted_contour(caplog) -> None:
     assert "hue=" in diag_lines[0] and "sat=" in diag_lines[0] and "val=" in diag_lines[0]
 
 
-def test_diag_reports_area_pass_but_solidity_fail_for_a_wing_shape(caplog) -> None:
+def test_diag_reports_area_pass_but_solidity_fail_when_required_for_a_wing_shape(caplog) -> None:
     # The reproduction of this session's actual bug report: a large,
     # well-saturated, correctly-coloured aircraft silhouette that the
-    # area filter clears easily but the default solidity_min=0.75
+    # area filter clears easily but solidity_min=0.75, if gated on,
     # rejects outright -- proving the model's contour DOES appear in the
     # raw contour list (ruling out an HSV/mask problem) and identifying
     # exactly which single stage discards it (not an inverted comparator
     # anywhere -- solidity_min is simply too strict for this silhouette).
+    # require_solidity is explicit here since the fix is exactly that this
+    # is no longer the default -- see the companion test below.
     base = _blank_frame(width=300, height=250)
     image = _draw_hex_wings(base.image, HOSTILE_HEX)
     frame = _frame_with_image(image, base)
+    detector = ColorDetector(ColorDetectorConfig(require_solidity=True))
 
     with caplog.at_level(logging.INFO, logger="celikkubbe.vision.l2_color"):
-        detections, _ = ColorDetector().detect(frame, diag=True)
+        detections, _ = detector.detect(frame, diag=True)
 
-    assert detections == []  # confirms the reported symptom: zero detections
+    assert detections == []
     diag_lines = [line for line in caplog.text.splitlines() if "DIAG hostile#0" in line]
     assert len(diag_lines) == 1
     line = diag_lines[0]
@@ -555,6 +641,140 @@ def test_diag_reports_area_pass_but_solidity_fail_for_a_wing_shape(caplog) -> No
     solidity_clause = line.split("solidity=")[1].split(")")[0]
     assert "FAIL" in solidity_clause, f"expected the solidity stage to fail, got: {solidity_clause}"
     assert "verdict=REJECT:solidity" in line
+
+
+def test_wing_shape_survives_as_one_contour_by_default(caplog) -> None:
+    # The actual fix: with require_solidity left at its new default
+    # (False), the identical wing silhouette above is measured, logged,
+    # and accepted -- solidity is diagnostic information now, not a gate
+    # this target set fails.
+    base = _blank_frame(width=300, height=250)
+    image = _draw_hex_wings(base.image, HOSTILE_HEX)
+    frame = _frame_with_image(image, base)
+
+    with caplog.at_level(logging.INFO, logger="celikkubbe.vision.l2_color"):
+        detections, _ = ColorDetector().detect(frame, diag=True)
+
+    assert len(detections) == 1
+    diag_lines = [line for line in caplog.text.splitlines() if "DIAG hostile#0" in line]
+    assert len(diag_lines) == 1
+    assert "verdict=ACCEPT" in diag_lines[0]
+
+
+# --- fill_enclosed_holes (Addition 1) ---
+
+
+def test_fill_enclosed_holes_fills_a_small_fully_enclosed_hole() -> None:
+    mask = np.zeros((60, 60), dtype=np.uint8)
+    cv2.rectangle(mask, (10, 10), (50, 50), 255, -1)
+    cv2.rectangle(mask, (25, 25), (35, 35), 0, -1)  # a 10x10 hole, fully enclosed
+
+    filled = fill_enclosed_holes(mask, max_hole_area_px=200)
+
+    assert filled[30, 30] == 255  # the hole is gone
+    assert filled[5, 5] == 0  # true background outside the shape is untouched
+
+
+def test_fill_enclosed_holes_leaves_a_hole_above_the_cap_untouched() -> None:
+    mask = np.zeros((60, 60), dtype=np.uint8)
+    cv2.rectangle(mask, (5, 5), (55, 55), 255, -1)
+    cv2.rectangle(mask, (15, 15), (45, 45), 0, -1)  # a 30x30 = 900px hole
+
+    filled = fill_enclosed_holes(mask, max_hole_area_px=100)
+
+    assert filled[30, 30] == 0  # too big to be "just a highlight" -- left alone
+
+
+def test_fill_enclosed_holes_does_not_affect_genuinely_separate_objects() -> None:
+    # Two blobs with real background between them are not a hole in
+    # either one -- RETR_CCOMP's hierarchy has no parent/child
+    # relationship between two disjoint top-level contours, so this must
+    # never bridge them regardless of max_hole_area_px.
+    mask = np.zeros((60, 120), dtype=np.uint8)
+    cv2.rectangle(mask, (5, 5), (45, 55), 255, -1)
+    cv2.rectangle(mask, (75, 5), (115, 55), 255, -1)
+
+    filled = fill_enclosed_holes(mask, max_hole_area_px=10_000)
+
+    assert filled[30, 60] == 0  # the gap between the two blobs stays background
+    contours, _ = cv2.findContours(filled, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    assert len(contours) == 2
+
+
+# --- apply_specular_bridging (Addition 2) ---
+
+
+def test_apply_specular_bridging_bridges_a_severed_shape() -> None:
+    # Two red blocks connected only by a highlight streak: severed in the
+    # raw threshold mask, one shape once bridging sees the streak is
+    # mostly attached to real target pixels.
+    hsv = np.full((60, 140, 3), (40, 40, 40), dtype=np.uint8)  # neutral background
+    hsv[10:50, 5:45] = (0, 200, 200)
+    hsv[10:50, 95:135] = (0, 200, 200)
+    hsv[25:35, 45:95] = (0, 30, 245)  # the highlight streak: low sat, high val
+
+    target_mask = cv2.inRange(hsv, (0, 90, 50), (10, 255, 255))
+    contours, _ = cv2.findContours(target_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    assert len(contours) == 2  # confirms the raw mask really is severed
+
+    bridged = apply_specular_bridging(
+        hsv, target_mask, sat_min=90, highlight_v_min=230, highlight_max_fraction=0.5
+    )
+    contours, _ = cv2.findContours(bridged, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    assert len(contours) == 1
+
+
+def test_apply_specular_bridging_rejects_a_bright_wall_touching_nothing() -> None:
+    hsv = np.full((60, 60, 3), (40, 40, 40), dtype=np.uint8)
+    hsv[10:50, 10:50] = (0, 30, 245)  # bright, low-saturation, touches no target colour
+
+    target_mask = cv2.inRange(hsv, (0, 90, 50), (10, 255, 255))
+    assert np.count_nonzero(target_mask) == 0  # nothing coloured in the frame at all
+
+    bridged = apply_specular_bridging(
+        hsv, target_mask, sat_min=90, highlight_v_min=230, highlight_max_fraction=0.5
+    )
+    assert np.count_nonzero(bridged) == 0
+
+
+def test_apply_specular_bridging_does_not_absorb_a_nearby_bright_region() -> None:
+    # A small, fully-saturated red target and a much larger bright wall
+    # elsewhere in frame, far enough apart to stay separate connected
+    # components -- the wall must not be absorbed into the accepted mask
+    # just because a highlight-permissive pass is running.
+    hsv = np.full((100, 200, 3), (40, 40, 40), dtype=np.uint8)
+    hsv[10:30, 10:30] = (0, 200, 200)  # small red target
+    hsv[10:90, 100:190] = (0, 30, 245)  # large bright wall, elsewhere
+
+    target_mask = cv2.inRange(hsv, (0, 90, 50), (10, 255, 255))
+
+    bridged = apply_specular_bridging(
+        hsv, target_mask, sat_min=90, highlight_v_min=230, highlight_max_fraction=0.5
+    )
+
+    assert np.count_nonzero(bridged[10:30, 10:30]) > 0  # the small target survives
+    assert np.count_nonzero(bridged[10:90, 100:190]) == 0  # the wall is not absorbed
+
+
+# --- integration: bridging fixes the reported fragmentation, end to end ---
+
+
+def test_wing_with_highlight_severs_without_bridging_but_stays_one_with_it() -> None:
+    base = _blank_frame(width=300, height=250)
+    image = _draw_hex_wings(base.image, HOSTILE_HEX)
+    cv2.line(image, (60, 145), (240, 145), (235, 235, 235), 6)  # a highlight across the wing roots
+    frame = _frame_with_image(image, base)
+
+    without_bridging = ColorDetector(ColorDetectorConfig(require_specular_bridging=False))
+    detections, debug = without_bridging.detect(frame, debug=True)
+    hostile_contours = [c for c in debug.contours if c.class_name == "hostile"]
+    assert len(hostile_contours) >= 2  # severed, exactly the reported symptom
+
+    with_bridging = ColorDetector(ColorDetectorConfig())  # require_specular_bridging=True default
+    detections, debug = with_bridging.detect(frame, debug=True)
+    hostile_contours = [c for c in debug.contours if c.class_name == "hostile"]
+    assert len(hostile_contours) == 1
+    assert len(detections) == 1
 
 
 # --- HSV preset persistence ---

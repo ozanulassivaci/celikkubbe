@@ -309,7 +309,13 @@ class TuningWindow(QDialog):
         box = QGroupBox(UI_LABEL_TR["GLOBAL_SECTION_TITLE"])
         layout = QVBoxLayout(box)
 
-        row, slider, label = _slider_row(UI_LABEL_TR["MORPH_KERNEL_LABEL"], 1, 15, 5)
+        # 0 means "auto": leaves ColorDetectorConfig.morph_kernel at None,
+        # so the detector computes the closing kernel itself from optics
+        # and an assumed highlight-gap width every frame (see
+        # l2_color.compute_morph_kernel_px). Any value above 0 sets an
+        # explicit fixed override instead.
+        row, slider, label = _slider_row(UI_LABEL_TR["MORPH_KERNEL_LABEL"], 0, 25, 0)
+        slider.setToolTip(UI_LABEL_TR["MORPH_KERNEL_AUTO_HINT"])
         slider.valueChanged.connect(self._set_morph_kernel)
         self._sliders["morph_kernel"] = (slider, label)
         layout.addWidget(row)
@@ -332,6 +338,32 @@ class TuningWindow(QDialog):
         self._require_circularity_checkbox = QCheckBox(UI_LABEL_TR["REQUIRE_CIRCULARITY_LABEL"])
         self._require_circularity_checkbox.toggled.connect(self._set_require_circularity)
         layout.addWidget(self._require_circularity_checkbox)
+
+        self._require_solidity_checkbox = QCheckBox(UI_LABEL_TR["REQUIRE_SOLIDITY_LABEL"])
+        self._require_solidity_checkbox.toggled.connect(self._set_require_solidity)
+        layout.addWidget(self._require_solidity_checkbox)
+
+        self._require_specular_bridging_checkbox = QCheckBox(
+            UI_LABEL_TR["REQUIRE_SPECULAR_BRIDGING_LABEL"]
+        )
+        self._require_specular_bridging_checkbox.toggled.connect(
+            self._set_require_specular_bridging
+        )
+        layout.addWidget(self._require_specular_bridging_checkbox)
+
+        # Provisional default (230) -- the right value depends on the
+        # venue's own lighting rig, not on anything derivable from
+        # optics, so this is exposed for on-the-day tuning rather than
+        # fixed in code. See l2_color.ColorDetectorConfig.highlight_v_min.
+        row, slider, label = _slider_row(UI_LABEL_TR["HIGHLIGHT_V_MIN_LABEL"], 0, 255, 230)
+        slider.valueChanged.connect(self._set_highlight_v_min)
+        self._sliders["highlight_v_min"] = (slider, label)
+        layout.addWidget(row)
+
+        row, slider, label = _slider_row(UI_LABEL_TR["HIGHLIGHT_MAX_FRACTION_LABEL"], 0, 100, 50)
+        slider.valueChanged.connect(self._set_highlight_max_fraction)
+        self._sliders["highlight_max_fraction"] = (slider, label)
+        layout.addWidget(row)
         return box
 
     def _build_class_group(self, class_name: str, title: str) -> QGroupBox:
@@ -487,7 +519,9 @@ class TuningWindow(QDialog):
         self._render_preview()
 
     def _set_morph_kernel(self, value: int) -> None:
-        self._apply_config(dataclasses.replace(self._working_config, morph_kernel=value))
+        self._apply_config(
+            dataclasses.replace(self._working_config, morph_kernel=value if value > 0 else None)
+        )
 
     def _set_min_area(self, value: int) -> None:
         self._apply_config(
@@ -499,6 +533,22 @@ class TuningWindow(QDialog):
 
     def _set_require_circularity(self, checked: bool) -> None:
         self._apply_config(dataclasses.replace(self._working_config, require_circularity=checked))
+
+    def _set_require_solidity(self, checked: bool) -> None:
+        self._apply_config(dataclasses.replace(self._working_config, require_solidity=checked))
+
+    def _set_require_specular_bridging(self, checked: bool) -> None:
+        self._apply_config(
+            dataclasses.replace(self._working_config, require_specular_bridging=checked)
+        )
+
+    def _set_highlight_v_min(self, value: int) -> None:
+        self._apply_config(dataclasses.replace(self._working_config, highlight_v_min=value))
+
+    def _set_highlight_max_fraction(self, value: int) -> None:
+        self._apply_config(
+            dataclasses.replace(self._working_config, highlight_max_fraction=value / 100.0)
+        )
 
     # --- live-apply: per-class fields ---
 
@@ -686,9 +736,11 @@ class TuningWindow(QDialog):
         hostile = next(c for c in cfg.classes if c.name == "hostile")
         friendly = next(c for c in cfg.classes if c.name == "friendly")
         values = {
-            "morph_kernel": cfg.morph_kernel,
+            "morph_kernel": cfg.morph_kernel if cfg.morph_kernel is not None else 0,
             "min_area": cfg.min_area_px if cfg.min_area_px is not None else 0,
             "circularity_min": round(cfg.circularity_min * 100),
+            "highlight_v_min": cfg.highlight_v_min,
+            "highlight_max_fraction": round(cfg.highlight_max_fraction * 100),
             "hostile_sat": hostile.sat_min,
             "hostile_val": hostile.val_min,
             "friendly_sat": friendly.sat_min,
@@ -711,6 +763,14 @@ class TuningWindow(QDialog):
         self._require_circularity_checkbox.blockSignals(True)
         self._require_circularity_checkbox.setChecked(cfg.require_circularity)
         self._require_circularity_checkbox.blockSignals(False)
+
+        self._require_solidity_checkbox.blockSignals(True)
+        self._require_solidity_checkbox.setChecked(cfg.require_solidity)
+        self._require_solidity_checkbox.blockSignals(False)
+
+        self._require_specular_bridging_checkbox.blockSignals(True)
+        self._require_specular_bridging_checkbox.setChecked(cfg.require_specular_bridging)
+        self._require_specular_bridging_checkbox.blockSignals(False)
 
     # --- preview ---
 
